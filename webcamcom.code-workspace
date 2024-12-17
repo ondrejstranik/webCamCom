@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../webcam"
+		},
+		{
+			"name": "webCamCom",
+			"path": "."
+		}
+	],
+	"settings": {}
+}
