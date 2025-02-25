@@ -21,11 +21,14 @@
 #include "soc/soc.h" //disable brownout problems
 #include "soc/rtc_cntl_reg.h"  //disable brownout problems
 #include "esp_http_server.h"
+#include <ESPmDNS.h>
+#include <string>
 
 //Replace with your network credentials
 
 const char* ssid     = "esp32";
 const char* password = "esp32esp32";
+String host = "hostname";
 
 
 #define PART_BOUNDARY "123456789000000000000987654321"
@@ -117,6 +120,18 @@ void startCameraServer(){
   }
 }
 
+void setupmDNS(){
+  int totalTry = 5;
+  while (!MDNS.begin(host) && totalTry > 0) {
+      Serial.println("*");
+      delay(1000);
+      totalTry--;
+  }
+  Serial.println("[Wifi] mDNS responder started");
+  Serial.print("[Wifi] You can now connect to: http://");
+  Serial.print(host);
+  Serial.println(".local");
+}
 
 
 void setup() {
@@ -185,6 +200,9 @@ void setup() {
   Serial.print("Camera Stream Ready! Go to: http://");
   Serial.print(WiFi.localIP());
   
+  setupmDNS();
+
+
   server.begin();
 
   // Start streaming web server
