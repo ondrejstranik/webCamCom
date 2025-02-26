@@ -28,7 +28,11 @@
 
 const char* ssid     = "esp32";
 const char* password = "esp32esp32";
-String host = "hostname";
+String host = "esp32";
+IPAddress ip(192,168,1,200);     
+IPAddress gateway(192,168,1,1);   
+IPAddress subnet(255,255,255,0);   
+
 
 
 #define PART_BOUNDARY "123456789000000000000987654321"
@@ -188,18 +192,21 @@ void setup() {
 
   delay(10);
 
-
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
+  WiFi.softAP(ssid, password);
+  WiFi.softAPConfig(ip, gateway, subnet);
+  //WiFi.mode(WIFI_STA);
+  //WiFi.config(ip, gateway, subnet);
+  //WiFi.begin(ssid, password);
+  //while (WiFi.status() != WL_CONNECTED) {
+  // delay(500);
+  //  Serial.print(".");
+  //}
   Serial.println("");
   Serial.println("WiFi connected");
   
   Serial.print("Camera Stream Ready! Go to: http://");
-  Serial.print(WiFi.localIP());
-  
+  //Serial.print(WiFi.localIP());
+  Serial.println(WiFi.softAPIP());
   setupmDNS();
 
 
