@@ -24,6 +24,12 @@
 #include <ESPmDNS.h>
 #include <string>
 
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
+
+
 //Replace with your network credentials
 
 const char* ssid     = "esp32";
@@ -31,7 +37,16 @@ const char* password = "esp32esp32";
 String host = "esp32";
 IPAddress ip(192,168,1,200);     
 IPAddress gateway(192,168,1,1);   
-IPAddress subnet(255,255,255,0);   
+IPAddress subnet(255,255,255,0);
+
+BLECharacteristic* pCharacteristic = NULL;
+BLEServer* pServer = NULL;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+uint32_t value = 10;
+
+#define SERVICE_UUID        "19b10000-e8f2-537e-4f6c-d104768a1214"
+#define CHARACTERISTIC_UUID "19b10001-e8f2-537e-4f6c-d104768a1214"
 
 
 
@@ -137,6 +152,15 @@ void setupmDNS(){
   Serial.println(".local");
 }
 
+class MyServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+  };
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+  }
+};
 
 void setup() {
 
@@ -192,22 +216,53 @@ void setup() {
 
   delay(10);
 
-  WiFi.softAP(ssid, password);
-  WiFi.softAPConfig(ip, gateway, subnet);
+  //WiFi.softAP(ssid, password);
+  //WiFi.softAPConfig(ip, gateway, subnet);
   //WiFi.mode(WIFI_STA);
   //WiFi.config(ip, gateway, subnet);
-  //WiFi.begin(ssid, password);
-  //while (WiFi.status() != WL_CONNECTED) {
-  // delay(500);
-  //  Serial.print(".");
-  //}
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
   Serial.println("");
   Serial.println("WiFi connected");
   
   Serial.print("Camera Stream Ready! Go to: http://");
-  //Serial.print(WiFi.localIP());
-  Serial.println(WiFi.softAPIP());
-  setupmDNS();
+  Serial.print(WiFi.localIP());
+  //Serial.println(WiFi.softAPIP());
+  //setupmDNS();
+
+  BLEDevice::init("ESP32");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+                                         CHARACTERISTIC_UUID,
+                                         BLECharacteristic::PROPERTY_READ   |
+                                         BLECharacteristic::PROPERTY_WRITE  |
+                                         BLECharacteristic::PROPERTY_NOTIFY |
+                                         BLECharacteristic::PROPERTY_INDICATE
+                                       );
+
+  pCharacteristic->addDescriptor(new BLE2902());
+
+
+  //pCharacteristic->setValue(String("Hello World says Neil").c_str());
+  pService->start();
+  // BLEAdvertising *pAdvertising = pServer->getAdvertising();  // this still is working for backward compatibility
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(false);
+  pAdvertising->setMinPreferred(0x0);  // set value to 0x00 to not advertise this parameter
+  BLEDevice::startAdvertising();
+  Serial.println("Characteristic defined! Now you can read it in your phone!");
+
+
+
+  //pCharacteristic->setValue(WiFi.localIP().toString());
+  //pCharacteristic->setValue(WiFi.localIP().toString().c_str());
+  //pCharacteristic->setValue("ahoj");
 
 
   server.begin();
@@ -217,7 +272,34 @@ void setup() {
 }
 
 void loop() {
- WiFiClient client = server.available();   // listen for incoming clients
+
+  if (deviceConnected) {
+    //pCharacteristic->setValue(WiFi.localIP().toString().c_str());
+    Serial.println("pCharacteristic value changed");
+    pCharacteristic->setValue(WiFi.localIP().toString().c_str());
+    //pCharacteristic->setValue(String(value).c_str());
+    value++;
+    pCharacteristic->notify();
+    delay(3000);    
+  }
+
+  // disconnecting
+  if (!deviceConnected && oldDeviceConnected) {
+    Serial.println("Device disconnected.");
+    delay(500); // give the bluetooth stack the chance to get things ready
+    pServer->startAdvertising(); // restart advertising
+    Serial.println("Start advertising");
+    oldDeviceConnected = deviceConnected;
+  }
+  // connecting
+  if (deviceConnected && !oldDeviceConnected) {
+    // do stuff here on connecting
+    oldDeviceConnected = deviceConnected;
+    Serial.println("Device Connected");
+    delay(500); // give the bluetooth stack the chance to get things ready
+  }
+
+  WiFiClient client = server.available();   // listen for incoming clients
 
   if (client) {                             // if you get a client,
     Serial.println("New Client.");           // print a message out the serial port
