@@ -32,14 +32,18 @@
 
 //Replace with your network credentials
 
-const char* ssid     = "esp32";
-const char* password = "esp32esp32";
+String ssid     = "esp32";
+String password = "esp32esp32";
 String host = "esp32";
 IPAddress ip(192,168,1,200);     
 IPAddress gateway(192,168,1,1);   
 IPAddress subnet(255,255,255,0);
 
 BLECharacteristic* pCharacteristic = NULL;
+BLECharacteristic* pLedCharacteristic = NULL;
+BLECharacteristic* pNameCharacteristic = NULL;
+BLECharacteristic* pPwdCharacteristic = NULL;
+
 BLEServer* pServer = NULL;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
@@ -47,8 +51,9 @@ uint32_t value = 10;
 
 #define SERVICE_UUID        "19b10000-e8f2-537e-4f6c-d104768a1214"
 #define CHARACTERISTIC_UUID "19b10001-e8f2-537e-4f6c-d104768a1214"
-
-
+#define NAME_CHARACTERISTIC_UUID "19b10003-e8f2-537e-4f6c-d104768a1214"
+#define PWD_CHARACTERISTIC_UUID "19b10004-e8f2-537e-4f6c-d104768a1214"
+#define LED_CHARACTERISTIC_UUID "19b10002-e8f2-537e-4f6c-d104768a1214"
 
 #define PART_BOUNDARY "123456789000000000000987654321"
 
@@ -162,6 +167,72 @@ class MyServerCallbacks: public BLEServerCallbacks {
   }
 };
 
+void connectToWifi(){
+  ssid = pNameCharacteristic->getValue().c_str();
+  password = pPwdCharacteristic -> getValue().c_str();
+  Serial.print("___wifi name: ");
+  Serial.println(ssid);
+  Serial.print("___wifi pwd: ");
+  Serial.println(password);
+
+  delay(500); 
+
+  // convert to char
+  //char charSsid[50];
+  //ssid.toCharArray(charSsid, 50);
+  //char charPwd[50];
+  //password.toCharArray(charPwd, 50);
+
+  //WiFi.begin(charSsid, charPwd);
+  const char* myssid = "esp32";
+  const char* mypass = "esp32esp32";
+  
+  WiFi.begin(myssid,mypass);
+
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.println("WiFi connected");
+
+
+  //if (WiFi.status() == WL_CONNECTED) {
+  //  Serial.println("");
+  //  Serial.println("WiFi connected");
+
+  //  Serial.print("Camera Stream Ready! Go to: http://");
+  //  Serial.print(WiFi.localIP());
+    //server.begin();
+
+    // Start streaming web server
+    //startCameraServer();
+
+
+  //} else {
+  //  Serial.println("");
+  //  Serial.println("WiFi NOT connected");    
+  //}
+
+
+};
+
+
+class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pLedCharacteristic) {
+    String value = pLedCharacteristic->getValue().c_str();
+    if (value == "1") {
+    Serial.print("Characteristic event, written: ");
+    Serial.println(value); 
+    connectToWifi();
+    pLedCharacteristic -> setValue("0");
+    Serial.print("Setting pLedCharacteristic to 0");
+    }
+  }
+};
+
+
 void setup() {
 
   Serial.begin(115200);
@@ -220,16 +291,21 @@ void setup() {
   //WiFi.softAPConfig(ip, gateway, subnet);
   //WiFi.mode(WIFI_STA);
   //WiFi.config(ip, gateway, subnet);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println("WiFi connected");
+ 
+  const char* myssid = "e";
+  const char* mypass = "e";
+  WiFi.begin(myssid,mypass);
+ 
+  //WiFi.begin(ssid, password);
+  //while (WiFi.status() != WL_CONNECTED) {
+  //  delay(500);
+  //  Serial.print(".");
+  //}
+  //Serial.println("");
+  //Serial.println("WiFi connected");
   
-  Serial.print("Camera Stream Ready! Go to: http://");
-  Serial.print(WiFi.localIP());
+  //Serial.print("Camera Stream Ready! Go to: http://");
+  //Serial.print(WiFi.localIP());
   //Serial.println(WiFi.softAPIP());
   //setupmDNS();
 
@@ -237,15 +313,42 @@ void setup() {
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
   BLEService *pService = pServer->createService(SERVICE_UUID);
-  pCharacteristic = pService->createCharacteristic(
+  
+  // Create BLE Characteristic
+    pCharacteristic = pService->createCharacteristic(
                                          CHARACTERISTIC_UUID,
                                          BLECharacteristic::PROPERTY_READ   |
                                          BLECharacteristic::PROPERTY_WRITE  |
                                          BLECharacteristic::PROPERTY_NOTIFY |
                                          BLECharacteristic::PROPERTY_INDICATE
                                        );
-
   pCharacteristic->addDescriptor(new BLE2902());
+
+  // Create the ON button Characteristic
+  pLedCharacteristic = pService->createCharacteristic(
+    LED_CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_WRITE |
+    BLECharacteristic::PROPERTY_READ 
+  );
+  pLedCharacteristic->addDescriptor(new BLE2902());
+
+  // Register the callback for the ON button characteristic
+  pLedCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
+
+  // Create the wifiName  Characteristic
+  pNameCharacteristic = pService->createCharacteristic(
+    NAME_CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_WRITE
+  );
+  pNameCharacteristic->addDescriptor(new BLE2902());
+
+  // Create the wifiPwd  Characteristic
+  pPwdCharacteristic = pService->createCharacteristic(
+    PWD_CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_WRITE
+  );
+  pPwdCharacteristic->addDescriptor(new BLE2902());
+
 
 
   //pCharacteristic->setValue(String("Hello World says Neil").c_str());
@@ -265,10 +368,7 @@ void setup() {
   //pCharacteristic->setValue("ahoj");
 
 
-  server.begin();
 
-  // Start streaming web server
-  startCameraServer();
 }
 
 void loop() {
@@ -278,8 +378,20 @@ void loop() {
     Serial.println("pCharacteristic value changed");
     pCharacteristic->setValue(WiFi.localIP().toString().c_str());
     //pCharacteristic->setValue(String(value).c_str());
+
     value++;
     pCharacteristic->notify();
+
+    ssid = pNameCharacteristic->getValue().c_str();
+    password = pPwdCharacteristic -> getValue().c_str();
+    Serial.print("wifi name: ");
+    Serial.println(ssid);
+    Serial.print("wifi pwd: ");
+    Serial.println(password);
+    String value = pLedCharacteristic->getValue().c_str();
+    Serial.print("pLedCharacteristic: ");
+    Serial.println(value);
+
     delay(3000);    
   }
 
@@ -299,59 +411,5 @@ void loop() {
     delay(500); // give the bluetooth stack the chance to get things ready
   }
 
-  WiFiClient client = server.available();   // listen for incoming clients
-
-  if (client) {                             // if you get a client,
-    Serial.println("New Client.");           // print a message out the serial port
-    String currentLine = "";                // make a String to hold incoming data from the client
-    while (client.connected()) {            // loop while the client's connected
-      if (client.available()) {             // if there's bytes to read from the client,
-        char c = client.read();             // read a byte, then
-        Serial.write(c);                    // print it out the serial monitor
-        if (c == '\n') {                    // if the byte is a newline character
-
-          // if the current line is blank, you got two newline characters in a row.
-          // that's the end of the client HTTP request, so send a response:
-          if (currentLine.length() == 0) {
-            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-            // and a content-type so the client knows what's coming, then a blank line:
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
-            client.println();
-
-            // the content of the HTTP response follows the header:
-            client.print("Click <a href=\"/H\">here</a> to turn the Builtin LED OFF.<br>");
-            client.print("Click <a href=\"/L\">here</a> to turn the Builtin LED ON.<br>");
-
-            // The HTTP response ends with another blank line:
-            client.println();
-            // break out of the while loop:
-            break;
-          } else {    // if you got a newline, then clear currentLine:
-            currentLine = "";
-          }
-        } else if (c != '\r') {  // if you got anything else but a carriage return character,
-          currentLine += c;      // add it to the end of the currentLine
-        }
-
-        // Check to see if the client request was "GET /H" or "GET /L":
-        if (currentLine.endsWith("GET /H")) {
-          digitalWrite(LED_BUILTIN, HIGH);               // GET /H turns the LED off
-          sensor_t * s = esp_camera_sensor_get();
-          s->set_special_effect(s, 0);
-
-        }
-        if (currentLine.endsWith("GET /L")) {
-          digitalWrite(LED_BUILTIN, LOW);                // GET /L turns the LED on
-          sensor_t * s = esp_camera_sensor_get();
-          s->set_special_effect(s, 1);
-
-        }
-      }
-    }
-    // close the connection:
-    client.stop();
-    Serial.println("Client Disconnected.");
-  }
-
+  
 }
