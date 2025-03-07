@@ -43,17 +43,18 @@ BLECharacteristic* pCharacteristic = NULL;
 BLECharacteristic* pLedCharacteristic = NULL;
 BLECharacteristic* pNameCharacteristic = NULL;
 BLECharacteristic* pPwdCharacteristic = NULL;
+BLECharacteristic* pSECharacteristic = NULL;
 
 BLEServer* pServer = NULL;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
-uint32_t value = 10;
 
 #define SERVICE_UUID        "19b10000-e8f2-537e-4f6c-d104768a1214"
 #define CHARACTERISTIC_UUID "19b10001-e8f2-537e-4f6c-d104768a1214"
 #define NAME_CHARACTERISTIC_UUID "19b10003-e8f2-537e-4f6c-d104768a1214"
 #define PWD_CHARACTERISTIC_UUID "19b10004-e8f2-537e-4f6c-d104768a1214"
 #define LED_CHARACTERISTIC_UUID "19b10002-e8f2-537e-4f6c-d104768a1214"
+#define SE_CHARACTERISTIC_UUID "19b10005-e8f2-537e-4f6c-d104768a1214"
 
 #define PART_BOUNDARY "123456789000000000000987654321"
 
@@ -174,46 +175,54 @@ void connectToWifi(){
   Serial.println(ssid);
   Serial.print("___wifi pwd: ");
   Serial.println(password);
-
-  delay(500); 
-
-  // convert to char
-  //char charSsid[50];
-  //ssid.toCharArray(charSsid, 50);
-  //char charPwd[50];
-  //password.toCharArray(charPwd, 50);
-
-  //WiFi.begin(charSsid, charPwd);
-  const char* myssid = "esp32";
-  const char* mypass = "esp32esp32";
   
-  WiFi.begin(myssid,mypass);
+  char _ssid[50];
+  ssid.toCharArray(_ssid, 50);
+  char _password[50];
+  password.toCharArray(_password, 50);
 
-
-  while (WiFi.status() != WL_CONNECTED) {
+  WiFi.begin(_ssid,_password);
+  int totalTry = 5;
+  while (WiFi.status() != WL_CONNECTED && totalTry > 0) {
     delay(500);
     Serial.print(".");
-  }
-  Serial.println("");
-  Serial.println("WiFi connected");
+    totalTry--;
+  }  
 
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("");
+    Serial.println("WiFi connected");
 
-  //if (WiFi.status() == WL_CONNECTED) {
-  //  Serial.println("");
-  //  Serial.println("WiFi connected");
-
-  //  Serial.print("Camera Stream Ready! Go to: http://");
-  //  Serial.print(WiFi.localIP());
+    Serial.print("Camera Stream Ready! Go to: http://");
+    Serial.print(WiFi.localIP());
     //server.begin();
 
     // Start streaming web server
-    //startCameraServer();
+    startCameraServer();
 
+    // set the wifiState characteristic
+    String myValue    = "connected";
+    pLedCharacteristic -> setValue(myValue.c_str());
+    Serial.print("Setting pLedCharacteristic to: " + myValue);
 
-  //} else {
-  //  Serial.println("");
-  //  Serial.println("WiFi NOT connected");    
-  //}
+    // set new ip to the characteristic
+    Serial.println("changing the characteristic of ip");
+    pCharacteristic->setValue(WiFi.localIP().toString().c_str());
+    pCharacteristic->notify();
+  
+  } else {
+    Serial.println("");
+    Serial.println("WiFi NOT connected");
+    // set the wifiState characteristic
+    String myValue    = "disconnected";
+    pLedCharacteristic -> setValue(myValue.c_str());
+
+    // set new ip to the characteristic
+    Serial.println("changing the characteristic of ip");
+    String myValue2    = "none";
+    pCharacteristic->setValue(myValue2.c_str());
+    pCharacteristic->notify();    
+  }
 
 
 };
@@ -222,18 +231,49 @@ void connectToWifi(){
 class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pLedCharacteristic) {
     String value = pLedCharacteristic->getValue().c_str();
-    if (value == "1") {
-    Serial.print("Characteristic event, written: ");
-    Serial.println(value); 
-    connectToWifi();
-    pLedCharacteristic -> setValue("0");
-    Serial.print("Setting pLedCharacteristic to 0");
+    Serial.println("Characteristic event, written: " + value);
+    
+    if (value == "connecting"){
+      Serial.println("try to connect to wifi ...");
+      connectToWifi();
+      delay(1000);
+
+    } else {
+      Serial.println( " not connecting ");
     }
+
+    
+
+    //}
+  }
+};
+
+class MySECharacteristicCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pSECharacteristic) {
+    String value = pSECharacteristic->getValue().c_str();
+    Serial.println("SE Characteristic event, written: " + value);
+    
+    sensor_t * s = esp_camera_sensor_get();
+
+    s->set_special_effect(s, 0);
+
+    if (value == "1"){
+      Serial.println("setting special effect 1");
+      s->set_special_effect(s, 1);
+    } else {
+      Serial.println("setting special effect 0");
+      s->set_special_effect(s, 0);
+    }
+
   }
 };
 
 
+
 void setup() {
+
+  // initialize digital pin LED_BUILTIN as an output.
+  pinMode(LED_BUILTIN, OUTPUT);
 
   Serial.begin(115200);
 
@@ -292,8 +332,8 @@ void setup() {
   //WiFi.mode(WIFI_STA);
   //WiFi.config(ip, gateway, subnet);
  
-  const char* myssid = "e";
-  const char* mypass = "e";
+  const char* myssid = "none";
+  const char* mypass = "none";
   WiFi.begin(myssid,mypass);
  
   //WiFi.begin(ssid, password);
@@ -349,6 +389,14 @@ void setup() {
   );
   pPwdCharacteristic->addDescriptor(new BLE2902());
 
+  // Create the special Effect Characteristic
+  pSECharacteristic = pService->createCharacteristic(
+    SE_CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_WRITE
+  );
+  pSECharacteristic->addDescriptor(new BLE2902());
+  // Register the callback for the ON button characteristic
+  pSECharacteristic->setCallbacks(new MySECharacteristicCallbacks());
 
 
   //pCharacteristic->setValue(String("Hello World says Neil").c_str());
@@ -373,27 +421,29 @@ void setup() {
 
 void loop() {
 
-  if (deviceConnected) {
-    //pCharacteristic->setValue(WiFi.localIP().toString().c_str());
-    Serial.println("pCharacteristic value changed");
-    pCharacteristic->setValue(WiFi.localIP().toString().c_str());
-    //pCharacteristic->setValue(String(value).c_str());
 
-    value++;
-    pCharacteristic->notify();
+  ssid = pNameCharacteristic->getValue().c_str();
+  password = pPwdCharacteristic -> getValue().c_str();
+  Serial.print("wifi name: ");
+  Serial.println(ssid);
+  Serial.print("wifi pwd: ");
+  Serial.println(password);
+  String value = pLedCharacteristic->getValue().c_str();
+  Serial.print("pLedCharacteristic: ");
+  Serial.println(value);
+  String value2 = pCharacteristic->getValue().c_str();
+  Serial.print("pCharacteristic: ");
+  Serial.println(value2);
+  String value3 = pSECharacteristic->getValue().c_str();
+  Serial.print("pSECharacteristic: ");
+  Serial.println(value3);
+  
+  digitalWrite(LED_BUILTIN, HIGH);  // turn the LED on (HIGH is the voltage level)
+  delay(1500);                      // wait for a second
+  digitalWrite(LED_BUILTIN, LOW);   // turn the LED off by making the voltage LOW
+  delay(1500);                      // wait for a second
+  
 
-    ssid = pNameCharacteristic->getValue().c_str();
-    password = pPwdCharacteristic -> getValue().c_str();
-    Serial.print("wifi name: ");
-    Serial.println(ssid);
-    Serial.print("wifi pwd: ");
-    Serial.println(password);
-    String value = pLedCharacteristic->getValue().c_str();
-    Serial.print("pLedCharacteristic: ");
-    Serial.println(value);
-
-    delay(3000);    
-  }
 
   // disconnecting
   if (!deviceConnected && oldDeviceConnected) {
