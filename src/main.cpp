@@ -86,56 +86,76 @@ static esp_err_t index_handler(httpd_req_t *req) {
   }
 
   const char index_html[] PROGMEM = R"rawliteral(
-    <!DOCTYPE HTML><html>
-    <head>
+  <!DOCTYPE html>
+  <html>
+  <head>
+      <title>ESP32 Web BLE App</title>
       <meta name="viewport" content="width=device-width, initial-scale=1">
-      <style>
-        body { text-align:center; }
-        .vert { margin-bottom: 10%; }
-        .hori{ margin-bottom: 0%; }
-      </style>
-    </head>
-    <body>
-      <div id="container">
-        <h2>ESP32-CAM Last Photo</h2>
-        <p>It might take more than 5 seconds to capture a photo.</p>
-        <p>
-          <button onclick="rotatePhoto();">ROTATE</button>
-          <button onclick="capturePhoto()">CAPTURE PHOTO</button>
-          <button onclick="location.reload();">REFRESH PAGE</button>
-        </p>
-      </div>
-      <div><img src="" id="photo" width="70%"></div>
-      <figure>
-        <div id="stream-container" class="image-container hidden">
-            <div class="close" id="close-stream">×</div>
-            <img id="stream" src="">
-        </div>
-      </figure>
-    </body>
-    <script>
+      <link rel="icon" type="image/jpeg" href="">
+  </head>
+  <style>
+  </style>
+  <body>
+    <img id="cameraStreamID" src="site-logo.jpg" alt="" />
+    <canvas id='myCanvas' width='50px' height='50px'></canvas>
+  </body>
+  <script>
+    // DOM Elements
+    const img = document.getElementById('cameraStreamID');
+    const cnvs = document.getElementById("myCanvas");
+    const ctx = cnvs.getContext("2d");
+    var moving = false;
+    var c=document.location.origin
+
+    function Draw(){
+      cnvs.style.position = "absolute";
+      cnvs.style.left = img.offsetLeft + "px";
+      cnvs.style.top = img.offsetTop + "px";
       
-      k=document.getElementById('stream-container')
-      const j=document.getElementById('stream')
-      var c=document.location.origin
-      j.src=`${c+':81'}/stream`
-      
-      var deg = 0;
-      function capturePhoto() {
-        var xhr = new XMLHttpRequest();
-        xhr.open('GET', "/capture", true);
-        xhr.send();
+      var ctx = cnvs.getContext("2d");
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#00ff00';
+      // circle
+      ctx.beginPath();
+      ctx.arc(25, 25, 24, 0, 2 * Math.PI, false);
+      ctx.stroke();
+      ctx.beginPath();
+      // hline
+      ctx.moveTo(25,0);
+      ctx.lineTo(25,50);
+      ctx.stroke();
+      // vline
+      ctx.moveTo(0,25);
+      ctx.lineTo(50,25);
+      ctx.stroke();
+    }
+
+    function move(e){
+      var newX = e.clientX - 10;
+      var newY = e.clientY - 10;
+      image.style.left = newX + "px";
+      image.style.top = newY + "px";
+    }
+
+    function initialClick(e) {
+      if(moving){
+        document.removeEventListener("mousemove", move);
+        moving = !moving;
+        return;
       }
-      function rotatePhoto() {
-        var img = document.getElementById("photo");
-        deg += 90;
-        if(isOdd(deg/90)){ document.getElementById("container").className = "vert"; }
-        else{ document.getElementById("container").className = "hori"; }
-        img.style.transform = "rotate(" + deg + "deg)";
-      }
-      function isOdd(n) { return Math.abs(n % 2) == 1; }
-    </script>
-    </html>)rawliteral";
+      moving = !moving;
+      image = this;
+      document.addEventListener("mousemove", move, false);
+    }
+
+    Draw()
+    cnvs.addEventListener("mousedown", initialClick, false);
+
+    // activate the link to stream
+    img.src=`${c+':81'}/stream`
+  </script>
+  </html>    
+  )rawliteral";
 
   return httpd_resp_send(req, (const char *)index_html, strlen(index_html));
  
