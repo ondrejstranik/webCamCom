@@ -71,8 +71,75 @@ static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
 httpd_handle_t stream_httpd = NULL;
+httpd_handle_t camera_httpd = NULL;
 
 WiFiServer server(80);
+
+static esp_err_t index_handler(httpd_req_t *req) {
+  esp_err_t res = ESP_OK;
+  
+  res = httpd_resp_set_type(req, "text/html");
+  //httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+
+  if(res != ESP_OK){
+    return res;
+  }
+
+  const char index_html[] PROGMEM = R"rawliteral(
+    <!DOCTYPE HTML><html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <style>
+        body { text-align:center; }
+        .vert { margin-bottom: 10%; }
+        .hori{ margin-bottom: 0%; }
+      </style>
+    </head>
+    <body>
+      <div id="container">
+        <h2>ESP32-CAM Last Photo</h2>
+        <p>It might take more than 5 seconds to capture a photo.</p>
+        <p>
+          <button onclick="rotatePhoto();">ROTATE</button>
+          <button onclick="capturePhoto()">CAPTURE PHOTO</button>
+          <button onclick="location.reload();">REFRESH PAGE</button>
+        </p>
+      </div>
+      <div><img src="" id="photo" width="70%"></div>
+      <figure>
+        <div id="stream-container" class="image-container hidden">
+            <div class="close" id="close-stream">×</div>
+            <img id="stream" src="">
+        </div>
+      </figure>
+    </body>
+    <script>
+      
+      k=document.getElementById('stream-container')
+      const j=document.getElementById('stream')
+      var c=document.location.origin
+      j.src=`${c+':81'}/stream`
+      
+      var deg = 0;
+      function capturePhoto() {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', "/capture", true);
+        xhr.send();
+      }
+      function rotatePhoto() {
+        var img = document.getElementById("photo");
+        deg += 90;
+        if(isOdd(deg/90)){ document.getElementById("container").className = "vert"; }
+        else{ document.getElementById("container").className = "hori"; }
+        img.style.transform = "rotate(" + deg + "deg)";
+      }
+      function isOdd(n) { return Math.abs(n % 2) == 1; }
+    </script>
+    </html>)rawliteral";
+
+  return httpd_resp_send(req, (const char *)index_html, strlen(index_html));
+ 
+}
 
 static esp_err_t stream_handler(httpd_req_t *req){
   camera_fb_t * fb = NULL;
@@ -81,17 +148,16 @@ static esp_err_t stream_handler(httpd_req_t *req){
   uint8_t * _jpg_buf = NULL;
   char * part_buf[64];
 
+  // stream the image
+  
   res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
   if(res != ESP_OK){
     return res;
   }
 
-  // send the static part of the web
-
-
-
-
-  // stream the image
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "X-Framerate", "60");
+  
   while(true){
     fb = esp_camera_fb_get();
     if (!fb) {
@@ -115,8 +181,6 @@ static esp_err_t stream_handler(httpd_req_t *req){
             fb->buf[xPosition*2+i*imageWidth*2+1] = 255;  // white line -- second byte (for RGB)
 
           }
-
-
 
           bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
           esp_camera_fb_return(fb);
@@ -159,20 +223,47 @@ static esp_err_t stream_handler(httpd_req_t *req){
 
 void startCameraServer(){
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.server_port = 81;
+  config.server_port = 80;
 
   httpd_uri_t index_uri = {
-    .uri       = "/",
-    .method    = HTTP_GET,
-    .handler   = stream_handler,
-    .user_ctx  = NULL
+    .uri = "/",
+    .method = HTTP_GET,
+    .handler = index_handler,
+    .user_ctx = NULL
+    #ifdef CONFIG_HTTPD_WS_SUPPORT
+    ,
+    .is_websocket = true,
+    .handle_ws_control_frames = false,
+    .supported_subprotocol = NULL
+    #endif
   };
-  
-  //Serial.printf("Starting web server on port: '%d'\n", config.server_port);
-  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
-    httpd_register_uri_handler(stream_httpd, &index_uri);
+
+  httpd_uri_t stream_uri = {
+    .uri = "/stream",
+    .method = HTTP_GET,
+    .handler = stream_handler,
+    .user_ctx = NULL
+#ifdef CONFIG_HTTPD_WS_SUPPORT
+    ,
+    .is_websocket = true,
+    .handle_ws_control_frames = false,
+    .supported_subprotocol = NULL
+#endif
+  };
+
+ 
+  Serial.printf("Starting web server on port: '%d'\n", config.server_port);
+  if (httpd_start(&camera_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(camera_httpd, &index_uri);
   }
-}
+  
+  config.server_port += 1;
+  config.ctrl_port += 1;
+  Serial.printf("Starting stream server on port: '%d'", config.server_port);
+  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
+    httpd_register_uri_handler(stream_httpd, &stream_uri);
+  };
+};
 
 void setupmDNS(){
   int totalTry = 5;
@@ -185,7 +276,7 @@ void setupmDNS(){
   Serial.print("[Wifi] You can now connect to: http://");
   Serial.print(host);
   Serial.println(".local");
-}
+};
 
 class MyServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) {
@@ -211,7 +302,7 @@ void connectToWifi(){
   password.toCharArray(_password, 50);
 
   WiFi.begin(_ssid,_password);
-  int totalTry = 5;
+  int totalTry = 10;
   while (WiFi.status() != WL_CONNECTED && totalTry > 0) {
     delay(500);
     Serial.print(".");
@@ -233,24 +324,30 @@ void connectToWifi(){
     String myValue    = "connected";
     pLedCharacteristic -> setValue(myValue.c_str());
     Serial.print("Setting pLedCharacteristic to: " + myValue);
+    delay(500);
 
     // set new ip to the characteristic
     Serial.println("changing the characteristic of ip");
     pCharacteristic->setValue(WiFi.localIP().toString().c_str());
     pCharacteristic->notify();
-  
+    delay(500);
+
+    
   } else {
     Serial.println("");
     Serial.println("WiFi NOT connected");
     // set the wifiState characteristic
     String myValue    = "disconnected";
     pLedCharacteristic -> setValue(myValue.c_str());
+    delay(500);
 
     // set new ip to the characteristic
     Serial.println("changing the characteristic of ip");
     String myValue2    = "none";
     pCharacteristic->setValue(myValue2.c_str());
     pCharacteristic->notify();    
+    delay(500);
+
   }
 
 
@@ -475,11 +572,37 @@ void loop() {
   delay(delayValue);                      // wait for a second
   
 
+  String myValue2   = pLedCharacteristic->getValue().c_str();
 
   if (WiFi.status() == WL_CONNECTED) {
     delayValue = 300;
+    if ((myValue2 != "connected")){
+      // set the wifiState characteristic
+      myValue2    = "connected";
+      pLedCharacteristic -> setValue(myValue2.c_str());
+      Serial.print("Setting pLedCharacteristic to: " + myValue2);
+      delay(500);
+
+      // set new ip to the characteristic
+      Serial.println("changing the characteristic of ip");
+      pCharacteristic->setValue(WiFi.localIP().toString().c_str());
+      pCharacteristic->notify();
+      delay(500);
+    }
   } else{
     delayValue = 1500;
+    if ((myValue2 == "connected")){
+      myValue2    = "disconnected";
+      pLedCharacteristic -> setValue(myValue2.c_str());
+      delay(500);
+  
+      // set new ip to the characteristic
+      Serial.println("changing the characteristic of ip");
+      myValue2    = "none";
+      pCharacteristic->setValue(myValue2.c_str());
+      pCharacteristic->notify();    
+      delay(500);
+    }
   }
 
   // disconnecting
@@ -497,7 +620,4 @@ void loop() {
     Serial.println("Device Connected");
     delay(500); // give the bluetooth stack the chance to get things ready
   }
-
-  
-
 }
