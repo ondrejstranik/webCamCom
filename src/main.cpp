@@ -38,6 +38,11 @@ String host = "esp32";
 IPAddress ip(192,168,1,200);     
 IPAddress gateway(192,168,1,1);   
 IPAddress subnet(255,255,255,0);
+uint32_t delayValue = 1500;
+uint32_t xPosition = 100;
+uint32_t yPosition = 200;
+
+
 
 BLECharacteristic* pCharacteristic = NULL;
 BLECharacteristic* pLedCharacteristic = NULL;
@@ -81,6 +86,12 @@ static esp_err_t stream_handler(httpd_req_t *req){
     return res;
   }
 
+  // send the static part of the web
+
+
+
+
+  // stream the image
   while(true){
     fb = esp_camera_fb_get();
     if (!fb) {
@@ -89,6 +100,24 @@ static esp_err_t stream_handler(httpd_req_t *req){
     } else {
       if(fb->width > 400){
         if(fb->format != PIXFORMAT_JPEG){
+          // add a lines to the image
+          unsigned short imageWidth = fb->width;
+          unsigned short imageHeight = fb->height;
+
+          // horizontal line
+          for(int i = 0; i < imageWidth ; i++){
+            fb->buf[(i+yPosition*imageWidth)*2] = 255;  // white line
+            fb->buf[(i+yPosition*imageWidth)*2+1] = 255;  // white line - second byte (for RGB)
+          }
+          // vertical line
+          for(int i = 0; i < imageHeight ; i++){
+            fb->buf[xPosition*2 +i*imageWidth*2] = 255;  // white line
+            fb->buf[xPosition*2+i*imageWidth*2+1] = 255;  // white line -- second byte (for RGB)
+
+          }
+
+
+
           bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
           esp_camera_fb_return(fb);
           fb = NULL;
@@ -308,9 +337,11 @@ void setup() {
   config.frame_size = FRAMESIZE_VGA;
 
   config.pixel_format = PIXFORMAT_JPEG; // for streaming
+  //config.pixel_format = PIXFORMAT_RGB565; // for image modification
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
+  //config.jpeg_quality = 12;
+  config.jpeg_quality = 63;
   config.fb_count = 1;
   
   
@@ -439,11 +470,17 @@ void loop() {
   Serial.println(value3);
   
   digitalWrite(LED_BUILTIN, HIGH);  // turn the LED on (HIGH is the voltage level)
-  delay(1500);                      // wait for a second
+  delay(delayValue);                      // wait for a second
   digitalWrite(LED_BUILTIN, LOW);   // turn the LED off by making the voltage LOW
-  delay(1500);                      // wait for a second
+  delay(delayValue);                      // wait for a second
   
 
+
+  if (WiFi.status() == WL_CONNECTED) {
+    delayValue = 300;
+  } else{
+    delayValue = 1500;
+  }
 
   // disconnecting
   if (!deviceConnected && oldDeviceConnected) {
@@ -462,4 +499,5 @@ void loop() {
   }
 
   
+
 }
