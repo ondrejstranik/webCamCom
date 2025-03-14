@@ -31,7 +31,7 @@
 
 
 //Replace with your network credentials
-
+const char* BLEDeviceName = "ESP32_2";
 String ssid     = "esp32";
 String password = "esp32esp32";
 String host = "esp32";
@@ -497,7 +497,8 @@ void setup() {
   //Serial.println(WiFi.softAPIP());
   //setupmDNS();
 
-  BLEDevice::init("ESP32");
+  
+  BLEDevice::init(BLEDeviceName);
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
   BLEService *pService = pServer->createService(SERVICE_UUID);
