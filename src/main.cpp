@@ -184,7 +184,7 @@ static esp_err_t stream_handler(httpd_req_t *req){
       Serial.println("Camera capture failed");
       res = ESP_FAIL;
     } else {
-      if(fb->width > 400){
+      if(fb->width > 200){
         if(fb->format != PIXFORMAT_JPEG){
           // add a lines to the image
           unsigned short imageWidth = fb->width;
@@ -451,14 +451,16 @@ void setup() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
 //  config.frame_size = FRAMESIZE_UXGA;
-  config.frame_size = FRAMESIZE_VGA;
+//  config.frame_size = FRAMESIZE_VGA;
+  config.frame_size =  FRAMESIZE_QVGA;
+
 
   config.pixel_format = PIXFORMAT_JPEG; // for streaming
   //config.pixel_format = PIXFORMAT_RGB565; // for image modification
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  //config.jpeg_quality = 12;
-  config.jpeg_quality = 63;
+  config.jpeg_quality = 12;
+  //config.jpeg_quality = 63;
   config.fb_count = 1;
   
   
