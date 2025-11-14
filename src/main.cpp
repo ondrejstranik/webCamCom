@@ -31,13 +31,18 @@
 
 
 //Replace with your network credentials
-const char* BLEDeviceName = "ESP32_2";
+const char* BLEDeviceName = "ESP32_4";
 String ssid     = "esp32";
 String password = "esp32esp32";
 String host = "esp32";
-IPAddress ip(192,168,1,200);     
-IPAddress gateway(192,168,1,1);   
-IPAddress subnet(255,255,255,0);
+//IPAddress ip(192,168,1,200);     
+//PAddress gateway(192,168,1,1);   
+//IPAddress subnet(255,255,255,0);
+//IPAddress ip(192,168,0,1);     
+//IPAddress gateway(192,168,0,1);   
+//IPAddress subnet(255,255,255,0);
+
+
 uint32_t delayValue = 1500;
 uint32_t xPosition = 100;
 uint32_t yPosition = 200;
@@ -378,7 +383,8 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pLedCharacteristic) {
     String value = pLedCharacteristic->getValue().c_str();
     Serial.println("Characteristic event, written: " + value);
-    
+    delay(100);
+    /*
     if (value == "connecting"){
       Serial.println("try to connect to wifi ...");
       connectToWifi();
@@ -387,28 +393,47 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
     } else {
       Serial.println( " not connecting ");
     }
-
+    */
     
 
-    //}
   }
 };
+
+
+void setJpegQuality(int quality) {
+  sensor_t *s = esp_camera_sensor_get();
+  if (s == NULL) {
+    Serial.println("Failed to get sensor!");
+    return;
+  }
+
+  // JPEG quality: 0–63 (lower = better quality)
+  if (quality < 0) quality = 0;
+  if (quality > 63) quality = 63;
+
+  s->set_quality(s, quality);
+  Serial.print("JPEG quality set to: ");
+  Serial.println(quality);
+}
+
+int getJpegQuality() {
+  sensor_t *s = esp_camera_sensor_get();
+  if (s == NULL) return -1;
+
+  return s->status.quality;   // 0–63 (lower = better quality)
+}
+
 
 class MySECharacteristicCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pSECharacteristic) {
     String value = pSECharacteristic->getValue().c_str();
     Serial.println("SE Characteristic event, written: " + value);
     
-    sensor_t * s = esp_camera_sensor_get();
-
-    s->set_special_effect(s, 0);
-
     if (value == "1"){
-      Serial.println("setting special effect 1");
-      s->set_special_effect(s, 1);
+      Serial.println("increasing jpeg compression");
+      setJpegQuality(getJpegQuality()+1);
     } else {
-      Serial.println("setting special effect 0");
-      s->set_special_effect(s, 0);
+      setJpegQuality(getJpegQuality()-1);
     }
 
   }
@@ -459,8 +484,8 @@ void setup() {
   //config.pixel_format = PIXFORMAT_RGB565; // for image modification
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
-  //config.jpeg_quality = 63;
+  //config.jpeg_quality = 12;
+  config.jpeg_quality = 63; //lowest quality
   config.fb_count = 1;
   
   
@@ -482,9 +507,41 @@ void setup() {
   //WiFi.mode(WIFI_STA);
   //WiFi.config(ip, gateway, subnet);
  
-  const char* myssid = "none";
-  const char* mypass = "none";
-  WiFi.begin(myssid,mypass);
+  //const char* myssid = "none";
+  //const char* mypass = "none";
+  //WiFi.begin(myssid,mypass);
+
+
+  Serial.println("\n[*] Creating AP");
+  //WiFi.mode(WIFI_AP);
+  //WiFi.softAPConfig(ip, gateway, subnet);
+  WiFi.softAP(ssid, password);
+
+  Serial.print("[+] AP Created with IP Gateway ");
+  Serial.println(WiFi.softAPIP());
+
+  /*
+
+  // set the wifiState characteristic
+  String myValue    = "connected";
+  pLedCharacteristic -> setValue(myValue.c_str());
+  Serial.println("Setting pLedCharacteristic to: " + myValue);
+  delay(500);
+
+  // set new ip to the characteristic
+  Serial.println("changing the characteristic of ip");
+  
+  pCharacteristic -> setValue(myValue.c_str());
+  
+  //pCharacteristic->setValue(WiFi.softAPIP().toString().c_str());
+  pCharacteristic->notify();
+  delay(500);
+
+  */
+
+  // Start streaming web server
+  startCameraServer();
+
  
   //WiFi.begin(ssid, password);
   //while (WiFi.status() != WL_CONNECTED) {
@@ -588,7 +645,19 @@ void loop() {
   String value3 = pSECharacteristic->getValue().c_str();
   Serial.print("pSECharacteristic: ");
   Serial.println(value3);
+  Serial.print("WIFI strength: ");
+  Serial.print(WiFi.RSSI());
   
+  Serial.print("[+] AP Created with IP Gateway ");
+  Serial.println(WiFi.softAPIP());
+
+
+  // set new ip to the characteristic
+  Serial.println("changing the characteristic of ip");
+  pCharacteristic->setValue(WiFi.softAPIP().toString().c_str());
+  pCharacteristic->notify();
+
+
   digitalWrite(LED_BUILTIN, HIGH);  // turn the LED on (HIGH is the voltage level)
   delay(delayValue);                      // wait for a second
   digitalWrite(LED_BUILTIN, LOW);   // turn the LED off by making the voltage LOW
