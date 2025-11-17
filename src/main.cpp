@@ -80,6 +80,23 @@ httpd_handle_t camera_httpd = NULL;
 
 WiFiServer server(80);
 
+// Handler for "/GET"
+static esp_err_t get_handler(httpd_req_t *req)
+{
+    const char resp[] = "Response from /GET endpoint!";
+    return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
+}
+
+// Handler for "/ping"
+static esp_err_t ping_handler(httpd_req_t *req)
+{
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  const char *resp = "{\"status\":\"ok\",\"ping\":1}";
+  return httpd_resp_send(req, resp, strlen(resp));
+}
+
+
 static esp_err_t index_handler(httpd_req_t *req) {
   esp_err_t res = ESP_OK;
   
@@ -276,10 +293,27 @@ void startCameraServer(){
 #endif
   };
 
+
+  httpd_uri_t get_uri = {
+    .uri       = "/GET",
+    .method    = HTTP_GET,
+    .handler   = get_handler,
+    .user_ctx  = NULL
+  };
+
+httpd_uri_t ping_uri = {
+    .uri       = "/ping",
+    .method    = HTTP_GET,
+    .handler   = ping_handler,
+    .user_ctx  = NULL
+};
+
  
   Serial.printf("Starting web server on port: '%d'\n", config.server_port);
   if (httpd_start(&camera_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(camera_httpd, &index_uri);
+    httpd_register_uri_handler(camera_httpd, &get_uri);
+    httpd_register_uri_handler(camera_httpd, &ping_uri);
   }
   
   config.server_port += 1;
