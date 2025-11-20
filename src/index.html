@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+  <html>
+  <head>
+      <title>ESP32 Web BLE App</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <link rel="icon" type="image/jpeg" href="">
+  </head>
+  <style>
+  </style>
+  <body>
+    <img id="cameraStreamID" src="site-logo.jpg" alt="" />
+    <canvas id='myCanvas' width='50px' height='50px'></canvas>
+
+    <p>Current JPEG Quality: <span id='qval'>...</span></p>
+    <button onclick='changeQuality(-2)' style='padding:10px;margin:5px;'>Increase Quality</button>
+    <button onclick='changeQuality(2)' style='padding:10px;margin:5px;'>Decrease Quality</button>
+
+  </body>
+  <script>
+    // DOM Elements
+    const img = document.getElementById('cameraStreamID');
+    const cnvs = document.getElementById("myCanvas");
+    const ctx = cnvs.getContext("2d");
+    var moving = false;
+    var c='http://192.168.4.1/'
+
+    function Draw(){
+      cnvs.style.position = "absolute";
+      cnvs.style.left = img.offsetLeft + "px";
+      cnvs.style.top = img.offsetTop + "px";
+      
+      var ctx = cnvs.getContext("2d");
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#00ff00';
+      // circle
+      ctx.beginPath();
+      ctx.arc(25, 25, 24, 0, 2 * Math.PI, false);
+      ctx.stroke();
+      ctx.beginPath();
+      // hline
+      ctx.moveTo(25,0);
+      ctx.lineTo(25,50);
+      ctx.stroke();
+      // vline
+      ctx.moveTo(0,25);
+      ctx.lineTo(50,25);
+      ctx.stroke();
+    }
+
+    function move(e){
+      var newX = e.clientX - 10;
+      var newY = e.clientY - 10;
+      image.style.left = newX + "px";
+      image.style.top = newY + "px";
+    }
+
+    function initialClick(e) {
+      if(moving){
+        document.removeEventListener("mousemove", move);
+        moving = !moving;
+        return;
+      }
+      moving = !moving;
+      image = this;
+      document.addEventListener("mousemove", move, false);
+    }
+
+    Draw()
+    cnvs.addEventListener("mousedown", initialClick, false);
+
+    // activate the link to stream
+    img.src=`http://192.168.4.1:81/stream`;
+
+    let current = 60;
+
+    function refreshQuality() {
+      fetch('http://192.168.4.1/get_jpeg_quality')
+        .then(r => r.json())
+        .then(d => {
+          current = d.quality;
+          document.getElementById('qval').innerText = current;
+        });
+    }
+
+    function changeQuality(delta) {
+      current += delta;
+      if(current < 1) current = 1;
+      if(current > 63) current = 63;
+
+      fetch(`http://192.168.4.1/set_jpeg_quality?val=${current}`)
+        .then(r => r.json())
+        .then(d => refreshQuality());
+    }
+
+    //refreshQuality();    
+
+    
+  </script>
+  </html>    
