@@ -117,6 +117,7 @@ static esp_err_t jpeg_quality_handler(httpd_req_t *req)
             sprintf(resp, "{\"status\":\"ok\",\"quality\":%d}", quality);
 
             httpd_resp_set_type(req, "application/json");
+            httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
             httpd_resp_send(req, resp, strlen(resp));
             return ESP_OK;
         }
@@ -135,6 +136,7 @@ static esp_err_t jpeg_quality_get_handler(httpd_req_t *req)
     sprintf(resp, "{\"quality\": %d}", q);
 
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_send(req, resp, strlen(resp));
     return ESP_OK;
 }
@@ -144,6 +146,7 @@ static esp_err_t index_handler(httpd_req_t *req) {
   esp_err_t res = ESP_OK;
   
   res = httpd_resp_set_type(req, "text/html");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   //httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
 
   if(res != ESP_OK){
@@ -175,7 +178,7 @@ static esp_err_t index_handler(httpd_req_t *req) {
     const cnvs = document.getElementById("myCanvas");
     const ctx = cnvs.getContext("2d");
     var moving = false;
-    var c=document.location.origin
+    var c=document.location.origin;
 
     function Draw(){
       cnvs.style.position = "absolute";
@@ -227,7 +230,7 @@ static esp_err_t index_handler(httpd_req_t *req) {
     let current = 60;
 
     function refreshQuality() {
-      fetch('/get_jpeg_quality')
+      fetch('${c}/get_jpeg_quality', {mode: "cors"})
         .then(r => r.json())
         .then(d => {
           current = d.quality;
@@ -240,7 +243,7 @@ static esp_err_t index_handler(httpd_req_t *req) {
       if(current < 1) current = 1;
       if(current > 63) current = 63;
 
-      fetch(`/set_jpeg_quality?val=${current}`)
+      fetch(`${c}/set_jpeg_quality?val=${current}`, {mode: "cors"})
         .then(r => r.json())
         .then(d => refreshQuality());
     }
@@ -677,7 +680,7 @@ void setup() {
   //Serial.print("Camera Stream Ready! Go to: http://");
   //Serial.print(WiFi.localIP());
   //Serial.println(WiFi.softAPIP());
-  //setupmDNS();
+  setupmDNS();
 
   
   BLEDevice::init(BLEDeviceName);
