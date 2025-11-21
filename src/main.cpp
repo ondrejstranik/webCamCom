@@ -86,6 +86,7 @@ WiFiServer server(80);
 static esp_err_t get_handler(httpd_req_t *req)
 {
     const char resp[] = "Response from /GET endpoint!";
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -98,11 +99,58 @@ static esp_err_t ping_handler(httpd_req_t *req)
   return httpd_resp_send(req, resp, strlen(resp));
 }
 
+static esp_err_t jpeg_quality_handler(httpd_req_t *req)
+{
+    // ---- Parse ?val=XX parameter ----
+    char buf[32];
+    char param_val[8];
+
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        if (httpd_query_key_value(buf, "val", param_val, sizeof(param_val)) == ESP_OK) {
+            int quality = atoi(param_val);
+
+            if (quality < 1) quality = 1;
+            if (quality > 63) quality = 63;
+
+            // ---- Set camera sensor compression ----
+            sensor_t *s = esp_camera_sensor_get();
+            s->set_quality(s, quality);
+
+            char resp[64];
+            sprintf(resp, "{\"status\":\"ok\",\"quality\":%d}", quality);
+
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+            httpd_resp_send(req, resp, strlen(resp));
+            return ESP_OK;
+        }
+    }
+
+    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad query string");
+    return ESP_FAIL;
+}
+
+static esp_err_t jpeg_quality_get_handler(httpd_req_t *req)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    int q = s->status.quality;
+
+    char resp[64];
+    sprintf(resp, "{\"quality\": %d}", q);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, resp, strlen(resp));
+    return ESP_OK;
+}
+
+
 
 static esp_err_t index_handler(httpd_req_t *req) {
   esp_err_t res = ESP_OK;
   
   res = httpd_resp_set_type(req, "text/html");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
 
   if(res != ESP_OK){
@@ -238,12 +286,28 @@ httpd_uri_t ping_uri = {
     .user_ctx  = NULL
 };
 
+httpd_uri_t jpeg_quality_uri = {
+    .uri = "/set_jpeg_quality",
+    .method = HTTP_GET,
+    .handler = jpeg_quality_handler,
+    .user_ctx = NULL
+};
+
+httpd_uri_t jpeg_quality_get_uri = {
+    .uri = "/get_jpeg_quality",
+    .method = HTTP_GET,
+    .handler = jpeg_quality_get_handler,
+    .user_ctx = NULL
+};
+
  
   Serial.printf("Starting web server on port: '%d'\n", config.server_port);
   if (httpd_start(&camera_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(camera_httpd, &index_uri);
     httpd_register_uri_handler(camera_httpd, &get_uri);
     httpd_register_uri_handler(camera_httpd, &ping_uri);
+    httpd_register_uri_handler(camera_httpd, &jpeg_quality_uri);
+    httpd_register_uri_handler(camera_httpd, &jpeg_quality_get_uri);
   }
   
   config.server_port += 1;
@@ -518,7 +582,8 @@ void setup() {
   //Serial.print("Camera Stream Ready! Go to: http://");
   //Serial.print(WiFi.localIP());
   //Serial.println(WiFi.softAPIP());
-  //setupmDNS();
+  
+  setupmDNS();
 
   
   BLEDevice::init(BLEDeviceName);
