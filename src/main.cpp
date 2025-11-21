@@ -151,19 +151,18 @@ static esp_err_t index_handler(httpd_req_t *req) {
 
   if(res != ESP_OK){
     return res;
-  }
+  };
 
-  const char index_html[] PROGMEM = R"rawliteral(
+  const char index_html[] PROGMEM = R"HTML_DELIM(
   <!DOCTYPE html>
   <html>
   <head>
       <title>ESP32 Web BLE App</title>
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <link rel="icon" type="image/jpeg" href="">
- 
-    <style>
-    </style>
-   </head>
+  </head>
+  <style>
+  </style>
   <body>
     <img id="cameraStreamID" src="site-logo.jpg" alt="" />
     <canvas id='myCanvas' width='50px' height='50px'></canvas>
@@ -172,6 +171,9 @@ static esp_err_t index_handler(httpd_req_t *req) {
     <button onclick='changeQuality(-2)' style='padding:10px;margin:5px;'>Increase Quality</button>
     <button onclick='changeQuality(2)' style='padding:10px;margin:5px;'>Decrease Quality</button>
 
+  </body>
+  )HTML_DELIM";
+ const char index_html1[] PROGMEM = R"HTML_DELIM(
 
   <script>
     // DOM Elements
@@ -180,7 +182,6 @@ static esp_err_t index_handler(httpd_req_t *req) {
     const ctx = cnvs.getContext("2d");
     var moving = false;
     var c=document.location.origin;
-    const ESP_IP = 'http://192.168.4.1';
 
     function Draw(){
       cnvs.style.position = "absolute";
@@ -205,6 +206,8 @@ static esp_err_t index_handler(httpd_req_t *req) {
       ctx.stroke();
     }
 
+      )HTML_DELIM";
+  const char index_html2[] PROGMEM = R"HTML_DELIM(
     function move(e){
       var newX = e.clientX - 10;
       var newY = e.clientY - 10;
@@ -212,52 +215,43 @@ static esp_err_t index_handler(httpd_req_t *req) {
       image.style.top = newY + "px";
     }
 
+
+  
     function initialClick(e) {
       if(moving){
-        document.removeEventListener("mousemove", move);
+        document.removeEventListener('mousemove', move);
         moving = !moving;
         return;
       }
       moving = !moving;
       image = this;
-      document.addEventListener("mousemove", move, false);
-    };
+      document.addEventListener('mousemove', move, false);
+    }
+  )HTML_DELIM";
+  const char index_html3[] PROGMEM = R"HTML_DELIM(
 
     Draw()
     cnvs.addEventListener("mousedown", initialClick, false);
-
-    // activate the link to stream
-    img.src=`\${c+':81'}/stream`;
-
-    let current = 60;
-    document.getElementById('qval').innerText = current;
-    
-    function changeQuality() {
-    };
-
-
-    function refreshQuality() {
-      fetch(`\${c}/get_jpeg_quality`, {mode: "cors"})
-        .then(r => r.json())
-        .then(d => {
-          current = d.quality;
-          document.getElementById('qval').innerText = current;
-        });
-    }
-
-
-    refreshQuality();    
-
-
-
+    img.src= c+':81/stream';
 
 
   </script>
-  </body>
   </html>    
-  )rawliteral";
+)HTML_DELIM";
 
-  return httpd_resp_send(req, (const char *)index_html, strlen(index_html));
+// send first chunk
+  httpd_resp_send_chunk(req, index_html, strlen(index_html));  
+    // send second chunk
+    // send second chunk
+  httpd_resp_send_chunk(req, index_html1, strlen(index_html1));
+      // send second chunk
+  httpd_resp_send_chunk(req, index_html2, strlen(index_html2));
+    // send second chunk
+  httpd_resp_send_chunk(req, index_html3, strlen(index_html3));
+
+  httpd_resp_send_chunk(req, NULL, 0);
+
+  return ESP_OK;
  
 }
 
