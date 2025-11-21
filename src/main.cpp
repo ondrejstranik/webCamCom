@@ -160,9 +160,10 @@ static esp_err_t index_handler(httpd_req_t *req) {
       <title>ESP32 Web BLE App</title>
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <link rel="icon" type="image/jpeg" href="">
-  </head>
-  <style>
-  </style>
+ 
+    <style>
+    </style>
+   </head>
   <body>
     <img id="cameraStreamID" src="site-logo.jpg" alt="" />
     <canvas id='myCanvas' width='50px' height='50px'></canvas>
@@ -171,7 +172,7 @@ static esp_err_t index_handler(httpd_req_t *req) {
     <button onclick='changeQuality(-2)' style='padding:10px;margin:5px;'>Increase Quality</button>
     <button onclick='changeQuality(2)' style='padding:10px;margin:5px;'>Decrease Quality</button>
 
-  </body>
+
   <script>
     // DOM Elements
     const img = document.getElementById('cameraStreamID');
@@ -179,6 +180,7 @@ static esp_err_t index_handler(httpd_req_t *req) {
     const ctx = cnvs.getContext("2d");
     var moving = false;
     var c=document.location.origin;
+    const ESP_IP = 'http://192.168.4.1';
 
     function Draw(){
       cnvs.style.position = "absolute";
@@ -219,18 +221,23 @@ static esp_err_t index_handler(httpd_req_t *req) {
       moving = !moving;
       image = this;
       document.addEventListener("mousemove", move, false);
-    }
+    };
 
     Draw()
     cnvs.addEventListener("mousedown", initialClick, false);
 
     // activate the link to stream
-    img.src=`${c+':81'}/stream`;
+    img.src=`\${c+':81'}/stream`;
 
     let current = 60;
+    document.getElementById('qval').innerText = current;
+    
+    function changeQuality() {
+    };
+
 
     function refreshQuality() {
-      fetch('${c}/get_jpeg_quality', {mode: "cors"})
+      fetch(`\${c}/get_jpeg_quality`, {mode: "cors"})
         .then(r => r.json())
         .then(d => {
           current = d.quality;
@@ -238,20 +245,15 @@ static esp_err_t index_handler(httpd_req_t *req) {
         });
     }
 
-    function changeQuality(delta) {
-      current += delta;
-      if(current < 1) current = 1;
-      if(current > 63) current = 63;
 
-      fetch(`${c}/set_jpeg_quality?val=${current}`, {mode: "cors"})
-        .then(r => r.json())
-        .then(d => refreshQuality());
-    }
+    refreshQuality();    
 
-    //refreshQuality();    
 
-    
+
+
+
   </script>
+  </body>
   </html>    
   )rawliteral";
 
