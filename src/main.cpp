@@ -23,20 +23,18 @@
 #include "esp_http_server.h"
 #include <ESPmDNS.h>
 #include <string>
-
-#include <BLEDevice.h>
-#include <BLEUtils.h>
-#include <BLEServer.h>
-#include <BLE2902.h>
+#include <HTTPClient.h>
 
 #include "index_html_gz.h"
 
 
 //Replace with your network credentials
-const char* BLEDeviceName = "ESP32_4";
 String ssid     = "esp32";
-String password = "esp32esp32";
+String password = "";
 String host = "esp32";
+int access_point = 0;
+String ipCam2 = "0";
+String ipAP = "192.168.4.1";
 //IPAddress ip(192,168,1,200);     
 //PAddress gateway(192,168,1,1);   
 //IPAddress subnet(255,255,255,0);
@@ -44,29 +42,11 @@ String host = "esp32";
 //IPAddress gateway(192,168,0,1);   
 //IPAddress subnet(255,255,255,0);
 
+int timing = 0;
 
 uint32_t delayValue = 1500;
 uint32_t xPosition = 100;
 uint32_t yPosition = 200;
-
-
-
-BLECharacteristic* pCharacteristic = NULL;
-BLECharacteristic* pLedCharacteristic = NULL;
-BLECharacteristic* pNameCharacteristic = NULL;
-BLECharacteristic* pPwdCharacteristic = NULL;
-BLECharacteristic* pSECharacteristic = NULL;
-
-BLEServer* pServer = NULL;
-bool deviceConnected = false;
-bool oldDeviceConnected = false;
-
-#define SERVICE_UUID        "19b10000-e8f2-537e-4f6c-d104768a1214"
-#define CHARACTERISTIC_UUID "19b10001-e8f2-537e-4f6c-d104768a1214"
-#define NAME_CHARACTERISTIC_UUID "19b10003-e8f2-537e-4f6c-d104768a1214"
-#define PWD_CHARACTERISTIC_UUID "19b10004-e8f2-537e-4f6c-d104768a1214"
-#define LED_CHARACTERISTIC_UUID "19b10002-e8f2-537e-4f6c-d104768a1214"
-#define SE_CHARACTERISTIC_UUID "19b10005-e8f2-537e-4f6c-d104768a1214"
 
 #define PART_BOUNDARY "123456789000000000000987654321"
 
@@ -82,14 +62,6 @@ httpd_handle_t camera_httpd = NULL;
 
 WiFiServer server(80);
 
-// Handler for "/GET"
-static esp_err_t get_handler(httpd_req_t *req)
-{
-    const char resp[] = "Response from /GET endpoint!";
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    return httpd_resp_send(req, resp, HTTPD_RESP_USE_STRLEN);
-}
-
 // Handler for "/ping"
 static esp_err_t ping_handler(httpd_req_t *req)
 {
@@ -99,53 +71,117 @@ static esp_err_t ping_handler(httpd_req_t *req)
   return httpd_resp_send(req, resp, strlen(resp));
 }
 
-static esp_err_t jpeg_quality_handler(httpd_req_t *req)
+// Handler for Camera Control "/camera /camera?set=quality&value=30"
+static esp_err_t camera_control_handler(httpd_req_t *req)
 {
-    // ---- Parse ?val=XX parameter ----
-    char buf[32];
-    char param_val[8];
+    // CORS headers
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
 
-    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
-        if (httpd_query_key_value(buf, "val", param_val, sizeof(param_val)) == ESP_OK) {
-            int quality = atoi(param_val);
+    if (req->method == HTTP_OPTIONS) {
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, OPTIONS");
+        httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "*");
+        return httpd_resp_send(req, NULL, 0);
+    }
 
-            if (quality < 1) quality = 1;
-            if (quality > 63) quality = 63;
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s) {
+        return httpd_resp_send_500(req);
+    }
 
-            // ---- Set camera sensor compression ----
-            sensor_t *s = esp_camera_sensor_get();
-            s->set_quality(s, quality);
+    char query[256];
+    char param[32];
+    char value_str[16];
+    int value = 0;
+    bool do_set = false;
 
-            char resp[64];
-            sprintf(resp, "{\"status\":\"ok\",\"quality\":%d}", quality);
+    // Read full query string
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
 
-            httpd_resp_set_type(req, "application/json");
-            httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-            httpd_resp_send(req, resp, strlen(resp));
-            return ESP_OK;
+        if (httpd_query_key_value(query, "set", param, sizeof(param)) == ESP_OK &&
+            httpd_query_key_value(query, "value", value_str, sizeof(value_str)) == ESP_OK)
+        {
+            do_set = true;
+            value = atoi(value_str);
         }
     }
 
-    httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Bad query string");
-    return ESP_FAIL;
-}
+    /* -------------------------
+        SET SECTION
+       ------------------------- */
+    if (do_set)
+    {
+        if (strcmp(param, "quality") == 0) {
+            if (value < 1) value = 1;
+            if (value > 63) value = 63;
+            s->set_quality(s, value);
+        }
+        else if (strcmp(param, "ae") == 0) {
+            value = (value != 0) ? 1 : 0;
+            s->set_aec2(s, value);
+            s->set_aec_value(s, s->status.aec_value); // refresh exposure
+        }
+        else if (strcmp(param, "exposure") == 0) {
+            if (s->status.aec2 == 0) { // only if AE disabled
+                if (value < 0) value = 0;
+                if (value > 1200) value = 1200;
+                s->set_aec_value(s, value);
+            }
+        }
+        else if (strcmp(param, "gain") == 0) {
+            if (value < 0) value = 0;
+            if (value > 6) value = 6; // typical max for gainceiling enum
+            s->set_gainceiling(s, (gainceiling_t)value);
+        }
+        else if (strcmp(param, "brightness") == 0) {
+            if (value < -2) value = -2;
+            if (value > 2)  value = 2;
+            s->set_brightness(s, value);
+        }
+        else if (strcmp(param, "contrast") == 0) {
+            if (value < -2) value = -2;
+            if (value > 2)  value = 2;
+            s->set_contrast(s, value);
+        }
+        else if (strcmp(param, "saturation") == 0) {
+            if (value < -2) value = -2;
+            if (value > 2)  value = 2;
+            s->set_saturation(s, value);
+        }
+        else if (strcmp(param, "ip") == 0) {
+            ipCam2 = String(value_str);
+        }
+        else {
+            httpd_resp_set_type(req, "application/json");
+            return httpd_resp_sendstr(req, "{\"error\":\"unknown_parameter\"}");
+        }
+    }
 
-static esp_err_t jpeg_quality_get_handler(httpd_req_t *req)
-{
-    sensor_t *s = esp_camera_sensor_get();
-    int q = s->status.quality;
+    
+    /* -------------------------
+        GET SECTION — JSON
+       ------------------------- */
+    int quality      = s->status.quality;
+    int exposure     = s->status.aec_value;
+    int auto_exp     = s->status.aec2;
+    int gain         = s->status.gainceiling;
+    int brightness   = s->status.brightness;
+    int contrast     = s->status.contrast;
+    int saturation   = s->status.saturation;
 
-    char resp[64];
-    sprintf(resp, "{\"quality\": %d}", q);
+    char json[256];
+    snprintf(json, sizeof(json),
+        "{\"quality\":%d,\"exposure\":%d,\"auto_exposure\":%d,"
+        "\"gain\":%d,\"brightness\":%d,\"contrast\":%d,\"saturation\":%d, \"ipCam2\":\"%s\"}",
+        quality, exposure, auto_exp,
+        gain, brightness, contrast, saturation, ipCam2.c_str()
+    );
 
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_send(req, resp, strlen(resp));
-    return ESP_OK;
+    return httpd_resp_sendstr(req, json);
 }
 
 
-
+// Handler for "/index"
 static esp_err_t index_handler(httpd_req_t *req) {
   esp_err_t res = ESP_OK;
   
@@ -161,6 +197,7 @@ static esp_err_t index_handler(httpd_req_t *req) {
  
 }
 
+// Handler for "/stream"
 static esp_err_t stream_handler(httpd_req_t *req){
   camera_fb_t * fb = NULL;
   esp_err_t res = ESP_OK;
@@ -271,14 +308,6 @@ void startCameraServer(){
 #endif
   };
 
-
-  httpd_uri_t get_uri = {
-    .uri       = "/GET",
-    .method    = HTTP_GET,
-    .handler   = get_handler,
-    .user_ctx  = NULL
-  };
-
 httpd_uri_t ping_uri = {
     .uri       = "/ping",
     .method    = HTTP_GET,
@@ -286,28 +315,19 @@ httpd_uri_t ping_uri = {
     .user_ctx  = NULL
 };
 
-httpd_uri_t jpeg_quality_uri = {
-    .uri = "/set_jpeg_quality",
+httpd_uri_t cam_ctrl = {
+    .uri = "/camera",
     .method = HTTP_GET,
-    .handler = jpeg_quality_handler,
+    .handler = camera_control_handler,
     .user_ctx = NULL
 };
 
-httpd_uri_t jpeg_quality_get_uri = {
-    .uri = "/get_jpeg_quality",
-    .method = HTTP_GET,
-    .handler = jpeg_quality_get_handler,
-    .user_ctx = NULL
-};
 
- 
   Serial.printf("Starting web server on port: '%d'\n", config.server_port);
   if (httpd_start(&camera_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(camera_httpd, &index_uri);
-    httpd_register_uri_handler(camera_httpd, &get_uri);
     httpd_register_uri_handler(camera_httpd, &ping_uri);
-    httpd_register_uri_handler(camera_httpd, &jpeg_quality_uri);
-    httpd_register_uri_handler(camera_httpd, &jpeg_quality_get_uri);
+    httpd_register_uri_handler(camera_httpd, &cam_ctrl);
   }
   
   config.server_port += 1;
@@ -331,30 +351,10 @@ void setupmDNS(){
   Serial.println(".local");
 };
 
-class MyServerCallbacks: public BLEServerCallbacks {
-  void onConnect(BLEServer* pServer) {
-    deviceConnected = true;
-  };
-
-  void onDisconnect(BLEServer* pServer) {
-    deviceConnected = false;
-  }
-};
-
 void connectToWifi(){
-  ssid = pNameCharacteristic->getValue().c_str();
-  password = pPwdCharacteristic -> getValue().c_str();
-  Serial.print("___wifi name: ");
-  Serial.println(ssid);
-  Serial.print("___wifi pwd: ");
-  Serial.println(password);
-  
-  char _ssid[50];
-  ssid.toCharArray(_ssid, 50);
-  char _password[50];
-  password.toCharArray(_password, 50);
 
-  WiFi.begin(_ssid,_password);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid,password);
   int totalTry = 10;
   while (WiFi.status() != WL_CONNECTED && totalTry > 0) {
     delay(500);
@@ -367,106 +367,48 @@ void connectToWifi(){
     Serial.println("WiFi connected");
 
     Serial.print("Camera Stream Ready! Go to: http://");
-    Serial.print(WiFi.localIP());
-    //server.begin();
+    ipCam2 = String(WiFi.localIP().toString());
+    Serial.print(ipCam2);
+    server.begin();
+    delayValue = 300;
+    access_point = 0;
 
-    // Start streaming web server
-    startCameraServer();
+    // send ip to the AP
+    String url = "http://" + ipAP + "/camera?set=ip&value=" + ipCam2;
+    Serial.print("sending IP to AP: ");
+    Serial.println(url);
 
-    // set the wifiState characteristic
-    String myValue    = "connected";
-    pLedCharacteristic -> setValue(myValue.c_str());
-    Serial.print("Setting pLedCharacteristic to: " + myValue);
-    delay(500);
 
-    // set new ip to the characteristic
-    Serial.println("changing the characteristic of ip");
-    pCharacteristic->setValue(WiFi.localIP().toString().c_str());
-    pCharacteristic->notify();
-    delay(500);
+    // Send IP via GET request
+    HTTPClient http;
+    http.begin(url);
 
-    
+    int httpCode = http.GET();
+    if (httpCode > 0) {
+      Serial.printf("Server response code: %d\n", httpCode);
+      Serial.println(http.getString());
+    } else {
+      Serial.printf("Failed to send request: %s\n", http.errorToString(httpCode).c_str());
+    }
+    http.end();
+
   } else {
-    Serial.println("");
-    Serial.println("WiFi NOT connected");
-    // set the wifiState characteristic
-    String myValue    = "disconnected";
-    pLedCharacteristic -> setValue(myValue.c_str());
-    delay(500);
-
-    // set new ip to the characteristic
-    Serial.println("changing the characteristic of ip");
-    String myValue2    = "none";
-    pCharacteristic->setValue(myValue2.c_str());
-    pCharacteristic->notify();    
-    delay(500);
-
+    Serial.println("\n[*] Creating AP");
+    WiFi.mode(WIFI_AP);
+    //WiFi.softAPConfig(ip, gateway, subnet);
+    WiFi.softAP(ssid, password);
+    Serial.print("[+] AP Created with IP Gateway ");
+    Serial.println(WiFi.softAPIP());
+    delayValue = 1500;
+    access_point= 1;
   }
+
+  // Start streaming web server
+  startCameraServer();
+  setupmDNS();
 
 
 };
-
-
-class MyCharacteristicCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* pLedCharacteristic) {
-    String value = pLedCharacteristic->getValue().c_str();
-    Serial.println("Characteristic event, written: " + value);
-    delay(100);
-    /*
-    if (value == "connecting"){
-      Serial.println("try to connect to wifi ...");
-      connectToWifi();
-      delay(1000);
-
-    } else {
-      Serial.println( " not connecting ");
-    }
-    */
-    
-
-  }
-};
-
-
-void setJpegQuality(int quality) {
-  sensor_t *s = esp_camera_sensor_get();
-  if (s == NULL) {
-    Serial.println("Failed to get sensor!");
-    return;
-  }
-
-  // JPEG quality: 0–63 (lower = better quality)
-  if (quality < 0) quality = 0;
-  if (quality > 63) quality = 63;
-
-  s->set_quality(s, quality);
-  Serial.print("JPEG quality set to: ");
-  Serial.println(quality);
-}
-
-int getJpegQuality() {
-  sensor_t *s = esp_camera_sensor_get();
-  if (s == NULL) return -1;
-
-  return s->status.quality;   // 0–63 (lower = better quality)
-}
-
-
-class MySECharacteristicCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* pSECharacteristic) {
-    String value = pSECharacteristic->getValue().c_str();
-    Serial.println("SE Characteristic event, written: " + value);
-    
-    if (value == "1"){
-      Serial.println("increasing jpeg compression");
-      setJpegQuality(getJpegQuality()+1);
-    } else {
-      setJpegQuality(getJpegQuality()-1);
-    }
-
-  }
-};
-
 
 
 void setup() {
@@ -478,9 +420,6 @@ void setup() {
 
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detector
  
-  //Serial.begin(115200);
-  //while(!Serial); // When the serial monitor is turned on, the program starts to execute
-
   Serial.setDebugOutput(false);
   
   camera_config_t config;
@@ -503,242 +442,70 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-//  config.frame_size = FRAMESIZE_UXGA;
-//  config.frame_size = FRAMESIZE_VGA;
-  config.frame_size =  FRAMESIZE_QVGA;
+  //config.frame_size = FRAMESIZE_UXGA;
+  config.frame_size = FRAMESIZE_VGA;
+  //config.frame_size =  FRAMESIZE_QVGA;
 
 
   config.pixel_format = PIXFORMAT_JPEG; // for streaming
   //config.pixel_format = PIXFORMAT_RGB565; // for image modification
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  //config.jpeg_quality = 12;
-  config.jpeg_quality = 63; //lowest quality
+  config.jpeg_quality = 64; //high quality
   config.fb_count = 1;
-  
   
   // Camera init
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
     return;
-  }
-  // Wi-Fi connection
+  };
+
+  // Set initial Camera Parameters
+  /*
+  sensor_t *s = esp_camera_sensor_get();
+  s->set_aec2(s, 0);             // disable auto-exposure
+  s->set_aec_value(s, 10);       // low exposure
+  s->set_gainceiling(s, GAINCEILING_2X); // lowest gain
+  s->set_brightness(s, -2);      // digital brightness offset
+  s->set_contrast(s, -2);        // optional: increase darkness of shadows
+  */
 
   pinMode(LED_BUILTIN, OUTPUT);      // set the LED pin mode
   digitalWrite(LED_BUILTIN, HIGH);  // set LED off
 
   delay(10);
 
-  //WiFi.softAP(ssid, password);
-  //WiFi.softAPConfig(ip, gateway, subnet);
-  //WiFi.mode(WIFI_STA);
-  //WiFi.config(ip, gateway, subnet);
- 
-  //const char* myssid = "none";
-  //const char* mypass = "none";
-  //WiFi.begin(myssid,mypass);
 
-
-  Serial.println("\n[*] Creating AP");
-  //WiFi.mode(WIFI_AP);
-  //WiFi.softAPConfig(ip, gateway, subnet);
-  WiFi.softAP(ssid, password);
-
-  Serial.print("[+] AP Created with IP Gateway ");
-  Serial.println(WiFi.softAPIP());
-
-  /*
-
-  // set the wifiState characteristic
-  String myValue    = "connected";
-  pLedCharacteristic -> setValue(myValue.c_str());
-  Serial.println("Setting pLedCharacteristic to: " + myValue);
-  delay(500);
-
-  // set new ip to the characteristic
-  Serial.println("changing the characteristic of ip");
-  
-  pCharacteristic -> setValue(myValue.c_str());
-  
-  //pCharacteristic->setValue(WiFi.softAPIP().toString().c_str());
-  pCharacteristic->notify();
-  delay(500);
-
-  */
-
-  // Start streaming web server
-  startCameraServer();
-
- 
-  //WiFi.begin(ssid, password);
-  //while (WiFi.status() != WL_CONNECTED) {
-  //  delay(500);
-  //  Serial.print(".");
-  //}
-  //Serial.println("");
-  //Serial.println("WiFi connected");
-  
-  //Serial.print("Camera Stream Ready! Go to: http://");
-  //Serial.print(WiFi.localIP());
-  //Serial.println(WiFi.softAPIP());
-  
-  setupmDNS();
-
-  
-  BLEDevice::init(BLEDeviceName);
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-  
-  // Create BLE Characteristic
-    pCharacteristic = pService->createCharacteristic(
-                                         CHARACTERISTIC_UUID,
-                                         BLECharacteristic::PROPERTY_READ   |
-                                         BLECharacteristic::PROPERTY_WRITE  |
-                                         BLECharacteristic::PROPERTY_NOTIFY |
-                                         BLECharacteristic::PROPERTY_INDICATE
-                                       );
-  pCharacteristic->addDescriptor(new BLE2902());
-
-  // Create the ON button Characteristic
-  pLedCharacteristic = pService->createCharacteristic(
-    LED_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_WRITE |
-    BLECharacteristic::PROPERTY_READ 
-  );
-  pLedCharacteristic->addDescriptor(new BLE2902());
-
-  // Register the callback for the ON button characteristic
-  pLedCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
-
-  // Create the wifiName  Characteristic
-  pNameCharacteristic = pService->createCharacteristic(
-    NAME_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_WRITE
-  );
-  pNameCharacteristic->addDescriptor(new BLE2902());
-
-  // Create the wifiPwd  Characteristic
-  pPwdCharacteristic = pService->createCharacteristic(
-    PWD_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_WRITE
-  );
-  pPwdCharacteristic->addDescriptor(new BLE2902());
-
-  // Create the special Effect Characteristic
-  pSECharacteristic = pService->createCharacteristic(
-    SE_CHARACTERISTIC_UUID,
-    BLECharacteristic::PROPERTY_WRITE
-  );
-  pSECharacteristic->addDescriptor(new BLE2902());
-  // Register the callback for the ON button characteristic
-  pSECharacteristic->setCallbacks(new MySECharacteristicCallbacks());
-
-
-  //pCharacteristic->setValue(String("Hello World says Neil").c_str());
-  pService->start();
-  // BLEAdvertising *pAdvertising = pServer->getAdvertising();  // this still is working for backward compatibility
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(false);
-  pAdvertising->setMinPreferred(0x0);  // set value to 0x00 to not advertise this parameter
-  BLEDevice::startAdvertising();
-  Serial.println("Characteristic defined! Now you can read it in your phone!");
-
-
-
-  //pCharacteristic->setValue(WiFi.localIP().toString());
-  //pCharacteristic->setValue(WiFi.localIP().toString().c_str());
-  //pCharacteristic->setValue("ahoj");
-
-
+  // Wi-Fi connection
+  connectToWifi();
 
 }
 
 void loop() {
 
-
-  ssid = pNameCharacteristic->getValue().c_str();
-  password = pPwdCharacteristic -> getValue().c_str();
+  Serial.println("");
   Serial.print("wifi name: ");
   Serial.println(ssid);
   Serial.print("wifi pwd: ");
   Serial.println(password);
-  String value = pLedCharacteristic->getValue().c_str();
-  Serial.print("pLedCharacteristic: ");
-  Serial.println(value);
-  String value2 = pCharacteristic->getValue().c_str();
-  Serial.print("pCharacteristic: ");
-  Serial.println(value2);
-  String value3 = pSECharacteristic->getValue().c_str();
-  Serial.print("pSECharacteristic: ");
-  Serial.println(value3);
-  Serial.print("WIFI strength: ");
-  Serial.print(WiFi.RSSI());
-  
-  Serial.print("[+] AP Created with IP Gateway ");
-  Serial.println(WiFi.softAPIP());
+  Serial.print("timing: ");
+  Serial.println(timing);
+  timing += 1;
 
-
-  // set new ip to the characteristic
-  Serial.println("changing the characteristic of ip");
-  pCharacteristic->setValue(WiFi.softAPIP().toString().c_str());
-  pCharacteristic->notify();
-
+ if (access_point == 1) {
+    Serial.print("[+] AP Created with IP Gateway ");
+    Serial.println(WiFi.softAPIP());
+ }
+ else {
+    Serial.print("[+] camera IP: ");
+    Serial.println(ipCam2);
+    Serial.print("WIFI strength: ");
+    Serial.println (WiFi.RSSI());
+ }
 
   digitalWrite(LED_BUILTIN, HIGH);  // turn the LED on (HIGH is the voltage level)
   delay(delayValue);                      // wait for a second
   digitalWrite(LED_BUILTIN, LOW);   // turn the LED off by making the voltage LOW
   delay(delayValue);                      // wait for a second
-  
-
-  String myValue2   = pLedCharacteristic->getValue().c_str();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    delayValue = 300;
-    if ((myValue2 != "connected")){
-      // set the wifiState characteristic
-      myValue2    = "connected";
-      pLedCharacteristic -> setValue(myValue2.c_str());
-      Serial.print("Setting pLedCharacteristic to: " + myValue2);
-      delay(500);
-
-      // set new ip to the characteristic
-      Serial.println("changing the characteristic of ip");
-      pCharacteristic->setValue(WiFi.localIP().toString().c_str());
-      pCharacteristic->notify();
-      delay(500);
-    }
-  } else{
-    delayValue = 1500;
-    if ((myValue2 == "connected")){
-      myValue2    = "disconnected";
-      pLedCharacteristic -> setValue(myValue2.c_str());
-      delay(500);
-  
-      // set new ip to the characteristic
-      Serial.println("changing the characteristic of ip");
-      myValue2    = "none";
-      pCharacteristic->setValue(myValue2.c_str());
-      pCharacteristic->notify();    
-      delay(500);
-    }
-  }
-
-  // disconnecting
-  if (!deviceConnected && oldDeviceConnected) {
-    Serial.println("Device disconnected.");
-    delay(500); // give the bluetooth stack the chance to get things ready
-    pServer->startAdvertising(); // restart advertising
-    Serial.println("Start advertising");
-    oldDeviceConnected = deviceConnected;
-  }
-  // connecting
-  if (deviceConnected && !oldDeviceConnected) {
-    // do stuff here on connecting
-    oldDeviceConnected = deviceConnected;
-    Serial.println("Device Connected");
-    delay(500); // give the bluetooth stack the chance to get things ready
-  }
 }
