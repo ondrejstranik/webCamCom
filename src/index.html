@@ -15,17 +15,18 @@
   </style>
   <body>
 
-    
+    <canvas id='myCanvas' width='50px' height='50px'></canvas>    
     <div class="vertical-container">
         <img id="cameraStreamID" src="site-logo.jpg" alt="" />
         <img id="camera2StreamID" src="site-logo.jpg" alt="" />
+        <button id='camSel' onclick='changeCam()' style='padding:10px;margin:5px;'>Camera 1 </button>
     </div>
-    <canvas id='myCanvas' width='50px' height='50px'></canvas>
-    <button id='camSel' onclick='changeCam()' style='padding:10px;margin:5px;'>ChangeCam</button>
     <p>Camera: <span id='camval'>...</span></p>
-    <p>Current JPEG ... Quality: <span id='qval'>...</span></p>
-    <button onclick='changeQuality(-2)' style='padding:10px;margin:5px;'>Increase Quality</button>
-    <button onclick='changeQuality(2)' style='padding:10px;margin:5px;'>Decrease Quality</button>
+    <div style="display:flex; align-items:center; gap:10px;"></div>
+      <button onclick='changeQuality(-10)' style='padding:10px;margin:5px;'>Increase Quality</button>
+      <span id='qval'> JPEG Quality: ... </span>
+      <button onclick='changeQuality(10)' style='padding:10px;margin:5px;'>Decrease Quality</button>
+    </div>
 
   </body>
   <script>
@@ -35,9 +36,11 @@
     const cnvs = document.getElementById("myCanvas");
     const ctx = cnvs.getContext("2d");
     var moving = false;
-    var c='192.168.4.1'
-    var c2 = ''
-    var camState = 1 // state of the image 1 .. cam1, 2 .. cam 2, 3 .. cam1 and cam2
+    var c='192.168.4.1';
+    var c2 = '0';
+    var cMod = c; // camera to modify
+    document.getElementById('camval').innerText = cMod
+    var camState = 1; // state of the image 1 .. cam1, 2 .. cam 2, 3 .. cam1 and cam2
     //var c='http://esp32.local'
     //var c=document.location.origin
 
@@ -100,12 +103,11 @@
         .then(r => r.json())
         .then(d => {
           c2 = d.ipCam2;
-          document.getElementById('camval').innerText = c2
         });
       }
 
     function refreshQuality() {
-      fetch(`${c}/camera`, {mode: "cors"})
+      fetch(`http://${cMod}/camera`, {mode: "cors"})
         .then(r => r.json())
         .then(d => {
           current = d.quality;
@@ -117,7 +119,7 @@
       current += delta;
       if(current < 1) current = 1;
       if(current > 63) current = 63;
-      fetch(`${c}/camera?set=quality&value=${current}`, {mode: "cors"})
+      fetch(`http://${cMod}/camera?set=quality&value=${current}`, {mode: "cors"})
         .then(r => r.json())
         .then(d => refreshQuality());
     }
@@ -126,23 +128,25 @@
 
     function changeCam() {
       refreshCamera2();
-      document.getElementById('camval').innerText = c2
-      if(c2 !='') camState += 1;
+      if(c2 !='0') camState += 1;
       if(camState > 3) camState = 1;
       document.getElementById('camSel').innerText = 'Camera ' +  camState;
       if(camState==1){
         img.src=`http://${c}:81/stream`;
         img2.src=``;
+        cMod = c;
       }
       if(camState==2){
         img.src=`http://${c2}:81/stream`;
         img2.src=``;
+        cMod = c2;
       }
       if(camState==3){
         img.src=`http://${c}:81/stream`;
         img2.src=`http://${c2}:81/stream`;
+        cMod = '0';
       }
-
+      document.getElementById('camval').innerText = cMod
 
 
     }
