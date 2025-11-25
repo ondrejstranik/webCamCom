@@ -43,6 +43,7 @@ String ipAP = "192.168.4.1";
 //IPAddress subnet(255,255,255,0);
 
 int timing = 0;
+int allAuto = 1;   // 1 = automatic control ON, 0 = manual
 
 uint32_t delayValue = 1500;
 uint32_t xPosition = 100;
@@ -61,6 +62,44 @@ httpd_handle_t stream_httpd = NULL;
 httpd_handle_t camera_httpd = NULL;
 
 WiFiServer server(80);
+
+
+void setAllAuto(int enable)
+{
+    allAuto = enable;
+
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s) return;
+
+    bool en = (enable != 0);   // convert to true/false
+
+    // AUTO EXPOSURE
+    s->set_exposure_ctrl(s, en);
+
+    // AUTO GAIN CONTROL
+    s->set_gain_ctrl(s, en);
+
+    // AUTO WHITE BALANCE
+    s->set_whitebal(s, en);
+
+    // ADVANCED AUTO EXPOSURE (AEC2)
+    s->set_aec2(s, en);
+
+    // OPTIONAL: reset brightness/contrast when auto enabled
+    if (en) {
+        s->set_brightness(s, 0);
+        s->set_contrast(s, 0);
+    }
+
+    // When going manual: freeze current values
+    if (!en) {
+        s->set_aec_value(s, s->status.aec_value);
+        s->set_agc_gain(s, s->status.agc_gain);
+    }
+
+    Serial.printf("allAuto = %d\n", en);
+}
+
 
 // Handler for "/ping"
 static esp_err_t ping_handler(httpd_req_t *req)
@@ -152,6 +191,9 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
               s->set_framesize(s, (framesize_t)value);
           }
         }
+        else if (strcmp(param, "allAuto") == 0) {
+          setAllAuto(value);
+        }
         else if (strcmp(param, "ip") == 0) {
             ipCam2 = String(value_str);
         }
@@ -178,9 +220,9 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
     snprintf(json, sizeof(json),
         "{\"quality\":%d,\"exposure\":%d,\"auto_exposure\":%d,"
         "\"gain\":%d,\"brightness\":%d,\"contrast\":%d,"
-        "\"saturation\":%d,\"framesize\":%d, \"ipCam2\":\"%s\"}",
+        "\"saturation\":%d,\"framesize\":%d,\"allAuto\":%d,\"ipCam2\":\"%s\"}",
         quality, exposure, auto_exp,
-        gain, brightness, contrast, saturation, framesize, ipCam2.c_str()
+        gain, brightness, contrast, saturation, framesize, allAuto, ipCam2.c_str()
     );
 
     httpd_resp_set_type(req, "application/json");
@@ -415,6 +457,19 @@ void connectToWifi(){
   setupmDNS();
 };
 
+
+
+void setCamDefault()
+{
+  // Set initial Camera Parameters
+  sensor_t *s = esp_camera_sensor_get();
+  s->set_gainceiling(s, GAINCEILING_2X); // lowest gain
+  s->set_brightness(s, 0);      // digital brightness offset
+  s->set_contrast(s, 0);        // optional: increase darkness of shadows
+  s->set_saturation(s,0);
+}
+
+
 void setup() {
 
   // initialize digital pin LED_BUILTIN as an output.
@@ -465,14 +520,7 @@ void setup() {
     return;
   };
 
-  // Set initial Camera Parameters
-  sensor_t *s = esp_camera_sensor_get();
-  s->set_exposure_ctrl(s, 0);             // disable auto-exposure
-  s->set_aec_value(s, 10);       // low exposure
-  s->set_gainceiling(s, GAINCEILING_2X); // lowest gain
-  s->set_brightness(s, 0);      // digital brightness offset
-  s->set_contrast(s, 0);        // optional: increase darkness of shadows
-
+  setCamDefault();
 
   pinMode(LED_BUILTIN, OUTPUT);      // set the LED pin mode
   digitalWrite(LED_BUILTIN, HIGH);  // set LED off

@@ -27,6 +27,16 @@
       <span id='qval'> JPEG Quality: ... </span>
       <button onclick='changeQuality(10)' style='padding:10px;margin:5px;'>Decrease Quality</button>
     </div>
+    <div style="margin:20px;">
+        <button id="autoBtn" onclick="toggleAuto()" style="padding:10px;">AUTO: ...</button>
+        Exposure: <span id="expVal">...</span><br>
+        <input type="range" id="expSlider" min="0" max="1200" value="0" oninput="setExposure(this.value)">
+    </div>
+    <div style="margin:20px;">
+        FrameSize: <span id="frameVal">...</span><br>
+        <input type="range" id="frameSlider" min="0" max="9" value="0" oninput="setFrame(this.value)">
+    </div>
+
 
   </body>
   <script>
@@ -43,6 +53,29 @@
     var camState = 1; // state of the image 1 .. cam1, 2 .. cam 2, 3 .. cam1 and cam2
     //var c='http://esp32.local'
     //var c=document.location.origin
+    let allAuto = 1;
+    let exposure = 0;
+    let current = 60;
+
+
+    function isLandscape() {
+        if (!isMobile()) return false; // desktop never swaps
+        if (window.screen && window.screen.orientation && window.screen.orientation.type) {
+            return window.screen.orientation.type.startsWith("landscape");
+        }
+        // Fallback for older browsers
+        return window.innerWidth > window.innerHeight;
+    }
+
+    function transformCoordsForPhone(x, y) {
+        if (isLandscape()) {
+            // Swap x and y if in landscape mode
+            return {x: y, y: x};
+        } else {
+            return {x: x, y: y};
+        }
+    }
+
 
     function Draw(){
       cnvs.style.position = "absolute";
@@ -70,8 +103,22 @@
     function move(e){
       var newX = e.clientX - 10;
       var newY = e.clientY - 10;
+
+    // Swap if mobile and landscape
+    // TODO: does not work
+    if (isMobile() && isLandscape()) {
+      image.style.left = newY + "px";
+      image.style.top = newX + "px";
+    } else
+    {
       image.style.left = newX + "px";
       image.style.top = newY + "px";
+
+    }
+      //let pos = transformCoordsForPhone(newX, newY);
+
+      //image.style.left = pos.x + "px";
+      //image.style.top = pos.y + "px";
     }
 
     function initialClick(e) {
@@ -84,36 +131,52 @@
       image = this;
       document.addEventListener("mousemove", move, false);
     }
-
-    Draw()
+    // draw the cross
+    Draw();
+    // activate clicking
     cnvs.addEventListener("mousedown", initialClick, false);
+
 
     // activate the link to stream
     img.src=`http://${c}:81/stream`;
     document.getElementById('camSel').innerText = 'Camera ' +  camState;
-    
-    refreshCamera2()
+    // set the parameters on screen
+    refreshSecondCamera();
+    refreshCameraParam();    
 
-
-    let current = 60;
-    document.getElementById('qval').innerText = current;
     
-    function refreshCamera2() {
+    function refreshSecondCamera() {
       fetch(`http://${c}/camera`, {mode: "cors"})
         .then(r => r.json())
         .then(d => {
           c2 = d.ipCam2;
         });
-      }
+    }
 
-    function refreshQuality() {
+    function refreshCameraParam() {
       fetch(`http://${cMod}/camera`, {mode: "cors"})
         .then(r => r.json())
         .then(d => {
           current = d.quality;
+          allAuto = d.allAuto;
+          exposure = d.exposure;
+          currentFrame = d.framesize;
           document.getElementById('qval').innerText = current;
+
+          // Update button text
+          document.getElementById('autoBtn').innerText =
+              "AUTO: " + (allAuto ? "ON" : "OFF");
+
+          // Update slider
+          document.getElementById('expSlider').value = exposure;
+          document.getElementById('expVal').innerText = exposure;
+
+          // Update frameslider
+          document.getElementById('frameSlider').value = currentFrame;
+          document.getElementById('frameVal').innerText = currentFrame;
+
         });
-      }
+    }
 
     function changeQuality(delta) {
       current += delta;
@@ -121,13 +184,21 @@
       if(current > 63) current = 63;
       fetch(`http://${cMod}/camera?set=quality&value=${current}`, {mode: "cors"})
         .then(r => r.json())
-        .then(d => refreshQuality());
+        .then(d => refreshCameraParam());
     }
 
-    refreshQuality();    
+    function setFrame(currentFrame) {
+      if(currentFrame < 0) currentFrame = 0;
+      if(currentFrame > 9) currentFrame = 9;
+      fetch(`http://${cMod}/camera?set=framesize&value=${currentFrame}`, {mode: "cors"})
+        .then(r => r.json())
+        .then(d => refreshCameraParam());
+    }
+
+
 
     function changeCam() {
-      refreshCamera2();
+      refreshSecondCamera();
       if(c2 !='0') camState += 1;
       if(camState > 3) camState = 1;
       document.getElementById('camSel').innerText = 'Camera ' +  camState;
@@ -147,7 +218,24 @@
         cMod = '0';
       }
       document.getElementById('camval').innerText = cMod
-      refreshQuality();   
+      refreshCameraParam();   
+    }
+
+    // Toggle auto / manual
+    function toggleAuto() {
+        let newVal = allAuto ? 0 : 1;
+        fetch(`http://${cMod}/camera?set=allAuto&value=${newVal}`)
+            .then(r => r.json())
+            .then(() => refreshCameraParam());
+    }
+
+    // Set manual exposure
+    function setExposure(val) {
+        document.getElementById('expVal').innerText = val;
+
+        fetch(`http://${cMod}/camera?set=exposure&value=${val}`)
+            .then(r => r.json())
+            .then(() => refreshCameraParam());
     }
     
   </script>
