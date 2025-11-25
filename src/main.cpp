@@ -121,7 +121,7 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
             s->set_aec_value(s, s->status.aec_value); // refresh exposure
         }
         else if (strcmp(param, "exposure") == 0) {
-            if (s->status.aec2 == 0) { // only if AE disabled
+            if (s->status.aec == 0) { // only if AE disabled
                 if (value < 0) value = 0;
                 if (value > 1200) value = 1200;
                 s->set_aec_value(s, value);
@@ -147,6 +147,11 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
             if (value > 2)  value = 2;
             s->set_saturation(s, value);
         }
+        else if (strcmp(param, "framesize") == 0) {
+          if (value >= 0 && value < FRAMESIZE_INVALID) {
+              s->set_framesize(s, (framesize_t)value);
+          }
+        }
         else if (strcmp(param, "ip") == 0) {
             ipCam2 = String(value_str);
         }
@@ -162,18 +167,20 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
        ------------------------- */
     int quality      = s->status.quality;
     int exposure     = s->status.aec_value;
-    int auto_exp     = s->status.aec2;
+    int auto_exp     = s->status.aec;
     int gain         = s->status.gainceiling;
     int brightness   = s->status.brightness;
     int contrast     = s->status.contrast;
     int saturation   = s->status.saturation;
+    int framesize    = s->status.framesize;
 
     char json[256];
     snprintf(json, sizeof(json),
         "{\"quality\":%d,\"exposure\":%d,\"auto_exposure\":%d,"
-        "\"gain\":%d,\"brightness\":%d,\"contrast\":%d,\"saturation\":%d, \"ipCam2\":\"%s\"}",
+        "\"gain\":%d,\"brightness\":%d,\"contrast\":%d,"
+        "\"saturation\":%d,\"framesize\":%d, \"ipCam2\":\"%s\"}",
         quality, exposure, auto_exp,
-        gain, brightness, contrast, saturation, ipCam2.c_str()
+        gain, brightness, contrast, saturation, framesize, ipCam2.c_str()
     );
 
     httpd_resp_set_type(req, "application/json");
@@ -406,10 +413,7 @@ void connectToWifi(){
   // Start streaming web server
   startCameraServer();
   setupmDNS();
-
-
 };
-
 
 void setup() {
 
@@ -462,14 +466,13 @@ void setup() {
   };
 
   // Set initial Camera Parameters
-  /*
   sensor_t *s = esp_camera_sensor_get();
-  s->set_aec2(s, 0);             // disable auto-exposure
+  s->set_exposure_ctrl(s, 0);             // disable auto-exposure
   s->set_aec_value(s, 10);       // low exposure
   s->set_gainceiling(s, GAINCEILING_2X); // lowest gain
-  s->set_brightness(s, -2);      // digital brightness offset
-  s->set_contrast(s, -2);        // optional: increase darkness of shadows
-  */
+  s->set_brightness(s, 0);      // digital brightness offset
+  s->set_contrast(s, 0);        // optional: increase darkness of shadows
+
 
   pinMode(LED_BUILTIN, OUTPUT);      // set the LED pin mode
   digitalWrite(LED_BUILTIN, HIGH);  // set LED off
