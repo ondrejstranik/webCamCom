@@ -419,7 +419,6 @@ void connectToWifi(){
     ipCam2 = String(WiFi.localIP().toString());
     Serial.print(ipCam2);
     server.begin();
-    delayValue = 300;
     access_point = 0;
 
     // send ip to the AP
@@ -448,7 +447,6 @@ void connectToWifi(){
     WiFi.softAP(ssid, password);
     Serial.print("[+] AP Created with IP Gateway ");
     Serial.println(WiFi.softAPIP());
-    delayValue = 1500;
     access_point= 1;
   }
 
@@ -536,10 +534,6 @@ void setup() {
 void loop() {
 
   Serial.println("");
-  Serial.print("wifi name: ");
-  Serial.println(ssid);
-  Serial.print("wifi pwd: ");
-  Serial.println(password);
   Serial.print("timing: ");
   Serial.println(timing);
   timing += 1;
@@ -547,16 +541,27 @@ void loop() {
  if (access_point == 1) {
     Serial.print("[+] AP Created with IP Gateway ");
     Serial.println(WiFi.softAPIP());
- }
+
+  // make one LED flash
+  digitalWrite(LED_BUILTIN, LOW);  // turn the LED on (HIGH is the voltage level)
+  delay(200);                         // wait
+  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED off by making the voltage LOW
+  }
  else {
     Serial.print("[+] camera IP: ");
     Serial.println(ipCam2);
+    Serial.print("connected to wifi: ");
+    Serial.println(ssid);
     Serial.print("WIFI strength: ");
     Serial.println (WiFi.RSSI());
- }
-
-  digitalWrite(LED_BUILTIN, HIGH);  // turn the LED on (HIGH is the voltage level)
-  delay(delayValue);                      // wait for a second
-  digitalWrite(LED_BUILTIN, LOW);   // turn the LED off by making the voltage LOW
-  delay(delayValue);                      // wait for a second
+  // make two LED flash
+  digitalWrite(LED_BUILTIN, LOW);  // turn the LED on (HIGH is the voltage level)
+  delay(200);                         // wait
+  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED off by making the voltage LOW
+  delay(200);                         // wait
+  digitalWrite(LED_BUILTIN, LOW);  // turn the LED on (HIGH is the voltage level)
+  delay(200);                         // wait
+  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED off by making the voltage LOW
+  }
+  delay(delayValue);                // wait
 }
