@@ -23,7 +23,9 @@
 #include "esp_http_server.h"
 #include <ESPmDNS.h>
 #include <string>
+#include <atomic>
 #include <HTTPClient.h>
+#include "lwip/sockets.h"
 
 #include "index_html_gz.h"
 
@@ -33,8 +35,41 @@ String ssid     = "esp32";
 String password = "";
 String host = "esp32";
 int access_point = 0;
-String ipCam2 = "0";
 String ipAP = "192.168.4.1";
+
+// all cameras run the same firmware: the first one that finds no "esp32" network
+// creates it (access point, 192.168.4.1), a further camera joins it as station
+#define WIFI_CHANNEL 6                  // fixed channel, so joining and scanning is fast
+#define STA_CONNECT_TIMEOUT_MS 10000    // how long to look for an existing access point at boot
+#define STA_LOST_RESTART_MS 30000       // station: restart (and re-decide the role) after this long without the access point
+#define REGISTER_INTERVAL_MS 5000       // station: how often the own ip is sent to the access point
+#define CAM2_TIMEOUT_MS 15000           // access point: forget the second camera when it was not heard for this long
+// access point: how often to look for a second access point with the same name.
+// a duplicate can only appear when both cameras start together, and every scan
+// pauses the access point shortly, so scan often only during the first minutes
+#define AP_SCAN_INTERVAL_MS 10000
+#define AP_SCAN_INTERVAL_LATE_MS 60000
+#define AP_SCAN_FAST_PERIOD_MS 120000
+
+// ip of the second camera ("0" = none), on the station camera its own ip.
+// written by the http task and read by loop(), therefore guarded by ipCam2Mux
+static char ipCam2[16] = "0";
+static portMUX_TYPE ipCam2Mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t cam2LastSeen = 0;
+
+static void setIpCam2(const char *ip)
+{
+  portENTER_CRITICAL(&ipCam2Mux);
+  strlcpy(ipCam2, ip, sizeof(ipCam2));
+  portEXIT_CRITICAL(&ipCam2Mux);
+}
+
+static void getIpCam2(char *out)
+{
+  portENTER_CRITICAL(&ipCam2Mux);
+  strlcpy(out, ipCam2, sizeof(ipCam2));
+  portEXIT_CRITICAL(&ipCam2Mux);
+}
 //IPAddress ip(192,168,1,200);     
 //PAddress gateway(192,168,1,1);   
 //IPAddress subnet(255,255,255,0);
@@ -54,14 +89,30 @@ uint32_t yPosition = 200;
 #define CAMERA_MODEL_XIAO_ESP32S3 // Has PSRAM
 #include "camera_pins.h"
 
-static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
-static const char* _STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
-static const char* _STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+#define STREAM_PORT 81
+#define MAX_STREAM_CLIENTS 4       // simultaneous /stream viewers (phone, python, ...)
+#define MAX_FRAMESIZE 5            // largest allowed framesize_t index (5 = FRAMESIZE_QVGA, 320x240)
+#define DEFAULT_QUALITY 20         // jpeg quality 1 (best) - 63 (worst)
 
-httpd_handle_t stream_httpd = NULL;
+static const char* _STREAM_HEADER =
+  "HTTP/1.1 200 OK\r\n"
+  "Content-Type: multipart/x-mixed-replace;boundary=" PART_BOUNDARY "\r\n"
+  "Access-Control-Allow-Origin: *\r\n"
+  "Cache-Control: no-cache, no-store\r\n"
+  "Connection: close\r\n"
+  "\r\n";
+static const char* _STREAM_PART = "--" PART_BOUNDARY "\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+static const char* _STREAM_PART_END = "\r\n";
+
 httpd_handle_t camera_httpd = NULL;
 
-WiFiServer server(80);
+// latest JPEG frame, written by captureTask and read by every stream client
+static SemaphoreHandle_t frameMutex = NULL;
+static uint8_t *frameBuf = NULL;
+static size_t frameLen = 0;
+static size_t frameCap = 0;
+static volatile uint32_t frameId = 0;      // incremented on every new frame, 0 = no frame yet
+static std::atomic<int> streamClients{0};
 
 
 void setAllAuto(int enable)
@@ -187,7 +238,9 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
             s->set_saturation(s, value);
         }
         else if (strcmp(param, "framesize") == 0) {
-          if (value >= 0 && value < FRAMESIZE_INVALID) {
+          if (value < 0) value = 0;
+          if (value > MAX_FRAMESIZE) value = MAX_FRAMESIZE;
+          if (value != s->status.framesize) {
               s->set_framesize(s, (framesize_t)value);
           }
         }
@@ -195,7 +248,11 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
           setAllAuto(value);
         }
         else if (strcmp(param, "ip") == 0) {
-            ipCam2 = String(value_str);
+            IPAddress ip;
+            if (ip.fromString(value_str)) {
+                setIpCam2(value_str);
+                cam2LastSeen = millis();
+            }
         }
         else {
             httpd_resp_set_type(req, "application/json");
@@ -216,16 +273,22 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
     int saturation   = s->status.saturation;
     int framesize    = s->status.framesize;
 
+    char ip2[16];
+    getIpCam2(ip2);
+
     char json[256];
     snprintf(json, sizeof(json),
         "{\"quality\":%d,\"exposure\":%d,\"auto_exposure\":%d,"
         "\"gain\":%d,\"brightness\":%d,\"contrast\":%d,"
-        "\"saturation\":%d,\"framesize\":%d,\"allAuto\":%d,\"ipCam2\":\"%s\"}",
+        "\"saturation\":%d,\"framesize\":%d,\"maxFramesize\":%d,"
+        "\"allAuto\":%d,\"ipCam2\":\"%s\",\"streamClients\":%d}",
         quality, exposure, auto_exp,
-        gain, brightness, contrast, saturation, framesize, allAuto, ipCam2.c_str()
+        gain, brightness, contrast, saturation, framesize, MAX_FRAMESIZE,
+        allAuto, ip2, streamClients.load()
     );
 
     httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_sendstr(req, json);
 }
 
@@ -246,115 +309,227 @@ static esp_err_t index_handler(httpd_req_t *req) {
  
 }
 
-// Handler for "/stream"
-static esp_err_t stream_handler(httpd_req_t *req){
-  camera_fb_t * fb = NULL;
-  esp_err_t res = ESP_OK;
-  size_t _jpg_buf_len = 0;
-  uint8_t * _jpg_buf = NULL;
-  char * part_buf[64];
+/* -------------------------
+    STREAMING
+    One capture task grabs frames from the camera and keeps the latest JPEG
+    in frameBuf. Every viewer of http://<ip>:81/stream is served by its own
+    task, so several viewers (phone, second tab, python) run in parallel and
+    a slow or dead viewer never blocks the others.
+   ------------------------- */
 
-  // stream the image
-  
-  res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
-  if(res != ESP_OK){
-    return res;
+// draw a white cross into a RGB565 frame (only used when not streaming JPEG)
+static void drawCross(camera_fb_t *fb)
+{
+  unsigned short imageWidth = fb->width;
+  unsigned short imageHeight = fb->height;
+  if (yPosition >= imageHeight || xPosition >= imageWidth) return;
+
+  // horizontal line
+  for(int i = 0; i < imageWidth ; i++){
+    fb->buf[(i+yPosition*imageWidth)*2] = 255;
+    fb->buf[(i+yPosition*imageWidth)*2+1] = 255;
   }
+  // vertical line
+  for(int i = 0; i < imageHeight ; i++){
+    fb->buf[xPosition*2 +i*imageWidth*2] = 255;
+    fb->buf[xPosition*2+i*imageWidth*2+1] = 255;
+  }
+}
 
-  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-  httpd_resp_set_hdr(req, "X-Framerate", "60");
-  
-  while(true){
-    fb = esp_camera_fb_get();
+static void captureTask(void *arg)
+{
+  while (true) {
+    // do not capture when nobody is watching
+    if (streamClients.load() == 0) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+
+    camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
       Serial.println("Camera capture failed");
-      res = ESP_FAIL;
-    } else {
-      if(fb->width > 200){
-        if(fb->format != PIXFORMAT_JPEG){
-          // add a lines to the image
-          unsigned short imageWidth = fb->width;
-          unsigned short imageHeight = fb->height;
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
 
-          // horizontal line
-          for(int i = 0; i < imageWidth ; i++){
-            fb->buf[(i+yPosition*imageWidth)*2] = 255;  // white line
-            fb->buf[(i+yPosition*imageWidth)*2+1] = 255;  // white line - second byte (for RGB)
-          }
-          // vertical line
-          for(int i = 0; i < imageHeight ; i++){
-            fb->buf[xPosition*2 +i*imageWidth*2] = 255;  // white line
-            fb->buf[xPosition*2+i*imageWidth*2+1] = 255;  // white line -- second byte (for RGB)
-
-          }
-
-          bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
-          esp_camera_fb_return(fb);
-          fb = NULL;
-          if(!jpeg_converted){
-            Serial.println("JPEG compression failed");
-            res = ESP_FAIL;
-          }
-        } else {
-          _jpg_buf_len = fb->len;
-          _jpg_buf = fb->buf;
-        }
+    uint8_t *jpg = fb->buf;
+    size_t len = fb->len;
+    bool converted = false;
+    if (fb->format != PIXFORMAT_JPEG) {
+      drawCross(fb);
+      converted = frame2jpg(fb, 80, &jpg, &len);
+      if (!converted) {
+        Serial.println("JPEG compression failed");
+        esp_camera_fb_return(fb);
+        continue;
       }
     }
-    if(res == ESP_OK){
-      size_t hlen = snprintf((char *)part_buf, 64, _STREAM_PART, _jpg_buf_len);
-      res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
+
+    xSemaphoreTake(frameMutex, portMAX_DELAY);
+    if (len > frameCap) {
+      size_t newCap = len + len / 2;
+      uint8_t *newBuf = (uint8_t *)heap_caps_realloc(frameBuf, newCap, MALLOC_CAP_SPIRAM);
+      if (newBuf) {
+        frameBuf = newBuf;
+        frameCap = newCap;
+      }
     }
-    if(res == ESP_OK){
-      res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
+    if (len <= frameCap) {
+      memcpy(frameBuf, jpg, len);
+      frameLen = len;
+      frameId++;
+      if (frameId == 0) frameId = 1;
     }
-    if(res == ESP_OK){
-      res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
-    }
-    if(fb){
-      esp_camera_fb_return(fb);
-      fb = NULL;
-      _jpg_buf = NULL;
-    } else if(_jpg_buf){
-      free(_jpg_buf);
-      _jpg_buf = NULL;
-    }
-    if(res != ESP_OK){
-      break;
-    }
-    //Serial.printf("MJPG: %uB\n",(uint32_t)(_jpg_buf_len));
+    xSemaphoreGive(frameMutex);
+
+    if (converted) free(jpg);
+    esp_camera_fb_return(fb);
   }
-  return res;
+}
+
+static bool sendAll(int sock, const uint8_t *data, size_t len)
+{
+  while (len > 0) {
+    int n = send(sock, data, len, 0);
+    if (n <= 0) return false;
+    data += n;
+    len -= n;
+  }
+  return true;
+}
+
+static bool sendStr(int sock, const char *str)
+{
+  return sendAll(sock, (const uint8_t *)str, strlen(str));
+}
+
+// read the HTTP request header, return true if it asks for /stream
+static bool readStreamRequest(int sock)
+{
+  char req[512];
+  size_t used = 0;
+  while (used < sizeof(req) - 1) {
+    int n = recv(sock, req + used, sizeof(req) - 1 - used, 0);
+    if (n <= 0) return false;
+    used += n;
+    req[used] = 0;
+    if (strstr(req, "\r\n\r\n")) break;
+  }
+  return strncmp(req, "GET /stream", 11) == 0;
+}
+
+static void streamClientTask(void *arg)
+{
+  int sock = (int)(intptr_t)arg;
+  uint8_t *buf = NULL;
+  size_t cap = 0;
+  uint32_t lastId = 0;
+  char part[96];
+
+  if (!readStreamRequest(sock)) {
+    sendStr(sock, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+  } else if (sendStr(sock, _STREAM_HEADER)) {
+    while (true) {
+      // wait for a frame newer than the last one sent
+      if (frameId == lastId) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+        continue;
+      }
+
+      // copy the latest frame, so the network send does not block the capture
+      xSemaphoreTake(frameMutex, portMAX_DELAY);
+      size_t len = frameLen;
+      if (len > cap) {
+        uint8_t *newBuf = (uint8_t *)heap_caps_realloc(buf, frameCap, MALLOC_CAP_SPIRAM);
+        if (newBuf) {
+          buf = newBuf;
+          cap = frameCap;
+        }
+      }
+      bool ok = (len <= cap);
+      if (ok) memcpy(buf, frameBuf, len);
+      lastId = frameId;
+      xSemaphoreGive(frameMutex);
+      if (!ok) break;
+
+      snprintf(part, sizeof(part), _STREAM_PART, (unsigned)len);
+      if (!sendStr(sock, part) ||
+          !sendAll(sock, buf, len) ||
+          !sendStr(sock, _STREAM_PART_END)) {
+        break;   // viewer closed the connection or stopped reading
+      }
+    }
+  }
+
+  close(sock);
+  free(buf);
+  streamClients--;
+  Serial.printf("stream client left, %d active\n", streamClients.load());
+  vTaskDelete(NULL);
+}
+
+static void streamServerTask(void *arg)
+{
+  int listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+  int opt = 1;
+  setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+  struct sockaddr_in addr = {};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  addr.sin_port = htons(STREAM_PORT);
+
+  if (listenSock < 0 ||
+      bind(listenSock, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
+      listen(listenSock, 4) != 0) {
+    Serial.println("Stream server start failed");
+    if (listenSock >= 0) close(listenSock);
+    vTaskDelete(NULL);
+    return;
+  }
+
+  while (true) {
+    struct sockaddr_in source;
+    socklen_t sourceLen = sizeof(source);
+    int sock = accept(listenSock, (struct sockaddr *)&source, &sourceLen);
+    if (sock < 0) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    // a viewer that does not read for 3 s is dropped
+    struct timeval timeout = {3, 0};
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+    if (streamClients.load() >= MAX_STREAM_CLIENTS) {
+      sendStr(sock, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+      close(sock);
+      continue;
+    }
+
+    streamClients++;
+    if (xTaskCreate(streamClientTask, "streamClient", 4096, (void *)(intptr_t)sock, 4, NULL) != pdPASS) {
+      streamClients--;
+      close(sock);
+      continue;
+    }
+    Serial.printf("stream client joined, %d active\n", streamClients.load());
+  }
 }
 
 void startCameraServer(){
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
+  config.max_open_sockets = 5;
+  config.lru_purge_enable = true;   // drop the oldest idle connection instead of refusing new ones
 
   httpd_uri_t index_uri = {
     .uri = "/",
     .method = HTTP_GET,
     .handler = index_handler,
     .user_ctx = NULL
-    #ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-    #endif
-  };
-
-  httpd_uri_t stream_uri = {
-    .uri = "/stream",
-    .method = HTTP_GET,
-    .handler = stream_handler,
-    .user_ctx = NULL
-#ifdef CONFIG_HTTPD_WS_SUPPORT
-    ,
-    .is_websocket = true,
-    .handle_ws_control_frames = false,
-    .supported_subprotocol = NULL
-#endif
   };
 
 httpd_uri_t ping_uri = {
@@ -378,13 +553,11 @@ httpd_uri_t cam_ctrl = {
     httpd_register_uri_handler(camera_httpd, &ping_uri);
     httpd_register_uri_handler(camera_httpd, &cam_ctrl);
   }
-  
-  config.server_port += 1;
-  config.ctrl_port += 1;
-  Serial.printf("Starting stream server on port: '%d'", config.server_port);
-  if (httpd_start(&stream_httpd, &config) == ESP_OK) {
-    httpd_register_uri_handler(stream_httpd, &stream_uri);
-  };
+
+  Serial.printf("Starting stream server on port: '%d'\n", STREAM_PORT);
+  frameMutex = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(captureTask, "capture", 4096, NULL, 5, NULL, 1);
+  xTaskCreate(streamServerTask, "streamServer", 4096, NULL, 5, NULL);
 };
 
 void setupmDNS(){
@@ -400,51 +573,78 @@ void setupmDNS(){
   Serial.println(".local");
 };
 
+// station: tell the access point camera our ip, repeated so it is
+// renewed after a reconnect or a restart of the access point
+void registerAtAP(){
+  String ip = WiFi.localIP().toString();
+  setIpCam2(ip.c_str());
+
+  HTTPClient http;
+  http.setConnectTimeout(1000);
+  http.setTimeout(1000);
+  http.begin("http://" + ipAP + "/camera?set=ip&value=" + ip);
+  int httpCode = http.GET();
+  if (httpCode <= 0) {
+    Serial.printf("sending IP to AP failed: %s\n", http.errorToString(httpCode).c_str());
+  }
+  http.end();
+}
+
+// access point: if two cameras became access point at the same time (both
+// powered on together), the one with the higher MAC restarts and joins the other
+void checkDuplicateAP(){
+  int n = WiFi.scanNetworks(false, false, false, 120, WIFI_CHANNEL, ssid.c_str());
+  uint8_t own[6];
+  WiFi.softAPmacAddress(own);
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == ssid && memcmp(own, WiFi.BSSID(i), 6) > 0) {
+      Serial.printf("second access point %s found, restarting as station\n", WiFi.BSSIDstr(i).c_str());
+      delay(100);
+      ESP.restart();
+    }
+  }
+  WiFi.scanDelete();
+}
+
 void connectToWifi(){
 
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid,password);
-  int totalTry = 10;
-  while (WiFi.status() != WL_CONNECTED && totalTry > 0) {
-    delay(500);
+  // WiFi power saving adds large latency/jitter to the video stream
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+
+  // random wait, so two cameras powered at the same moment do not decide at the same time
+  delay(esp_random() % 3000);
+
+  WiFi.begin(ssid, password, WIFI_CHANNEL);
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < STA_CONNECT_TIMEOUT_MS) {
+    delay(250);
     Serial.print(".");
-    totalTry--;
-  }  
+  }
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("");
     Serial.println("WiFi connected");
-
-    Serial.print("Camera Stream Ready! Go to: http://");
-    ipCam2 = String(WiFi.localIP().toString());
-    Serial.print(ipCam2);
-    server.begin();
     access_point = 0;
+    host = "esp32-cam2";            // the access point camera already uses "esp32"
+    WiFi.setAutoReconnect(true);
 
-    // send ip to the AP
-    String url = "http://" + ipAP + "/camera?set=ip&value=" + ipCam2;
-    Serial.print("sending IP to AP: ");
-    Serial.println(url);
-
-
-    // Send IP via GET request
-    HTTPClient http;
-    http.begin(url);
-
-    int httpCode = http.GET();
-    if (httpCode > 0) {
-      Serial.printf("Server response code: %d\n", httpCode);
-      Serial.println(http.getString());
-    } else {
-      Serial.printf("Failed to send request: %s\n", http.errorToString(httpCode).c_str());
-    }
-    http.end();
+    registerAtAP();
+    Serial.print("Camera Stream Ready! Go to: http://");
+    Serial.println(WiFi.localIP());
 
   } else {
     Serial.println("\n[*] Creating AP");
-    WiFi.mode(WIFI_AP);
-    //WiFi.softAPConfig(ip, gateway, subnet);
-    WiFi.softAP(ssid, password);
+    // stop the station from searching, it would switch the radio away from the AP channel
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect();
+    // AP + STA, so the camera can scan for a second access point (see checkDuplicateAP)
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(ssid, password, WIFI_CHANNEL, 0, 4);
+    WiFi.setSleep(false);
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
     Serial.print("[+] AP Created with IP Gateway ");
     Serial.println(WiFi.softAPIP());
     access_point= 1;
@@ -454,6 +654,40 @@ void connectToWifi(){
   startCameraServer();
   setupmDNS();
 };
+
+// called from loop(): keep the connection between the cameras alive
+void maintainWifi(){
+  static uint32_t lastConnected = millis();
+  static uint32_t lastRegister = 0;
+  static uint32_t lastScan = millis();
+  uint32_t now = millis();
+
+  if (access_point == 1) {
+    if (cam2LastSeen != 0 && now - cam2LastSeen > CAM2_TIMEOUT_MS) {
+      Serial.println("second camera lost");
+      setIpCam2("0");
+      cam2LastSeen = 0;
+    }
+    uint32_t scanInterval = (now < AP_SCAN_FAST_PERIOD_MS) ? AP_SCAN_INTERVAL_MS : AP_SCAN_INTERVAL_LATE_MS;
+    if (now - lastScan > scanInterval) {
+      lastScan = now;
+      checkDuplicateAP();
+    }
+  } else {
+    if (WiFi.status() == WL_CONNECTED) {
+      lastConnected = now;
+      if (now - lastRegister > REGISTER_INTERVAL_MS) {
+        lastRegister = now;
+        registerAtAP();
+      }
+    } else if (now - lastConnected > STA_LOST_RESTART_MS) {
+      // no access point any more: restart, then this camera becomes the access point if none is there
+      Serial.println("access point lost, restarting");
+      delay(100);
+      ESP.restart();
+    }
+  }
+}
 
 
 
@@ -465,6 +699,8 @@ void setCamDefault()
   s->set_brightness(s, 0);      // digital brightness offset
   s->set_contrast(s, 0);        // optional: increase darkness of shadows
   s->set_saturation(s,0);
+  s->set_quality(s, DEFAULT_QUALITY);
+  s->set_framesize(s, (framesize_t)MAX_FRAMESIZE);
 }
 
 
@@ -474,6 +710,8 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
 
   Serial.begin(115200);
+  // shows whether a lost connection was a crash/brownout (restart) or a WiFi problem
+  Serial.printf("reset reason: %d (1 power on, 3 software, 4 panic, 5-7 watchdog, 9 brownout)\n", esp_reset_reason());
 
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detector
  
@@ -499,17 +737,18 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  //config.frame_size = FRAMESIZE_UXGA;
+  // init with VGA so the frame buffers are large enough for any quality,
+  // the working framesize (MAX_FRAMESIZE) is set afterwards in setCamDefault()
   config.frame_size = FRAMESIZE_VGA;
-  //config.frame_size =  FRAMESIZE_QVGA;
 
 
   config.pixel_format = PIXFORMAT_JPEG; // for streaming
   //config.pixel_format = PIXFORMAT_RGB565; // for image modification
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  // two buffers: the sensor captures the next frame while the last one is sent
+  config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 64; //high quality
-  config.fb_count = 1;
+  config.jpeg_quality = DEFAULT_QUALITY;
+  config.fb_count = 2;
   
   // Camera init
   esp_err_t err = esp_camera_init(&config);
@@ -538,6 +777,8 @@ void loop() {
   Serial.println(timing);
   timing += 1;
 
+  maintainWifi();
+
  if (access_point == 1) {
     Serial.print("[+] AP Created with IP Gateway ");
     Serial.println(WiFi.softAPIP());
@@ -549,7 +790,7 @@ void loop() {
   }
  else {
     Serial.print("[+] camera IP: ");
-    Serial.println(ipCam2);
+    Serial.println(WiFi.localIP());
     Serial.print("connected to wifi: ");
     Serial.println(ssid);
     Serial.print("WIFI strength: ");

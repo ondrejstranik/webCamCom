@@ -12,20 +12,23 @@
     align-items: center;    /* center horizontally */
     gap: 10px;              /* spacing between images */
   }
+  .vertical-container img {
+    max-width: 100%;
+  }
   </style>
   <body>
 
-    <canvas id='myCanvas' width='50px' height='50px'></canvas>    
+    <canvas id='myCanvas' width='50px' height='50px'></canvas>
     <div class="vertical-container">
-        <img id="cameraStreamID" src="site-logo.jpg" alt="" />
-        <img id="camera2StreamID" src="site-logo.jpg" alt="" />
+        <img id="cameraStreamID" alt="" />
+        <img id="camera2StreamID" alt="" />
         <button id='camSel' onclick='changeCam()' style='padding:10px;margin:5px;'>Camera 1 </button>
     </div>
     <p>Camera: <span id='camval'>...</span></p>
-    <div style="display:flex; align-items:center; gap:10px;"></div>
-      <button onclick='changeQuality(-10)' style='padding:10px;margin:5px;'>Increase Quality</button>
+    <div style="display:flex; align-items:center; gap:10px;">
+      <button onclick='changeQuality(-5)' style='padding:10px;margin:5px;'>Increase Quality</button>
       <span id='qval'> JPEG Quality: ... </span>
-      <button onclick='changeQuality(10)' style='padding:10px;margin:5px;'>Decrease Quality</button>
+      <button onclick='changeQuality(5)' style='padding:10px;margin:5px;'>Decrease Quality</button>
     </div>
     <div style="margin:20px;">
         <button id="autoBtn" onclick="toggleAuto()" style="padding:10px;">AUTO: ...</button>
@@ -34,7 +37,7 @@
     </div>
     <div style="margin:20px;">
         FrameSize: <span id="frameVal">...</span><br>
-        <input type="range" id="frameSlider" min="0" max="9" value="0" oninput="setFrame(this.value)">
+        <input type="range" id="frameSlider" min="0" max="5" value="5" oninput="setFrame(this.value)">
     </div>
 
 
@@ -48,15 +51,19 @@
     var moving = false;
     var c='192.168.4.1';
     var c2 = '0';
-    var cMod = c; // camera to modify
-    document.getElementById('camval').innerText = cMod
     var camState = 1; // state of the image 1 .. cam1, 2 .. cam 2, 3 .. cam1 and cam2
     //var c='http://esp32.local'
     //var c=document.location.origin
     let allAuto = 1;
     let exposure = 0;
-    let current = 60;
+    let current = 20;
+    let maxFrame = 5;
+    const EMPTY_IMG = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
+
+    function isMobile() {
+        return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    }
 
     function isLandscape() {
         if (!isMobile()) return false; // desktop never swaps
@@ -81,7 +88,7 @@
       cnvs.style.position = "absolute";
       cnvs.style.left = img.offsetLeft + "px";
       cnvs.style.top = img.offsetTop + "px";
-      
+
       var ctx = cnvs.getContext("2d");
       ctx.lineWidth = 3;
       ctx.strokeStyle = '#00ff00';
@@ -137,106 +144,235 @@
     cnvs.addEventListener("mousedown", initialClick, false);
 
 
-    // activate the link to stream
-    img.src=`http://${c}:81/stream`;
-    document.getElementById('camSel').innerText = 'Camera ' +  camState;
-    // set the parameters on screen
-    refreshSecondCamera();
-    refreshCameraParam();    
+    /* ---------- video streams ---------- */
 
-    
-    function refreshSecondCamera() {
-      fetch(`http://${c}/camera`, {mode: "cors"})
-        .then(r => r.json())
-        .then(d => {
-          c2 = d.ipCam2;
+    // The MJPEG stream is read with fetch() instead of <img src=stream>:
+    // an <img> just freezes when the connection stalls, here every frame is
+    // seen, so a stream without new frames for STALL_MS is reopened.
+    const STALL_MS = 3000;
+    const RETRY_MS = 1000;
+    const CRLF2 = [13, 10, 13, 10];
+
+    // start (ip given) or stop (ip null) the stream shown in an <img>
+    function setStream(el, ip) {
+      el._ip = ip;
+      startStream(el);
+    }
+
+    function stopStream(el) {
+      clearTimeout(el._retry);
+      const ctrl = el._ctrl;
+      el._ctrl = null;              // mark as stopped before aborting
+      if (ctrl) ctrl.abort();
+    }
+
+    function startStream(el) {
+      stopStream(el);
+      if (!el._ip || el._ip == '0' || document.hidden) {
+        if (!el._ip || el._ip == '0') {
+          el.style.display = 'none';
+          el.src = EMPTY_IMG;
+        }
+        return;
+      }
+      el.style.display = '';
+      const ctrl = new AbortController();
+      el._ctrl = ctrl;
+      el._lastFrame = Date.now();
+      readStream(el, el._ip, ctrl.signal)
+        .catch(() => {})
+        .finally(() => {
+          if (el._ctrl !== ctrl) return;      // stopped or replaced meanwhile
+          el._ctrl = null;
+          el._retry = setTimeout(() => startStream(el), RETRY_MS);
         });
     }
 
-    function refreshCameraParam() {
-      fetch(`http://${cMod}/camera`, {mode: "cors"})
+    function indexOf(buf, pattern, from) {
+      outer: for (let i = from; i <= buf.length - pattern.length; i++) {
+        for (let j = 0; j < pattern.length; j++) {
+          if (buf[i + j] != pattern[j]) continue outer;
+        }
+        return i;
+      }
+      return -1;
+    }
+
+    // each part: --boundary\r\nContent-Type: ...\r\nContent-Length: N\r\n\r\n<N bytes jpeg>\r\n
+    async function readStream(el, ip, signal) {
+      const r = await fetch(`http://${ip}:81/stream?t=${Date.now()}`, {signal, cache: 'no-store'});
+      if (!r.ok || !r.body) throw new Error('stream http ' + r.status);
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = new Uint8Array(0);
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) return;
+        const joined = new Uint8Array(buf.length + value.length);
+        joined.set(buf);
+        joined.set(value, buf.length);
+        buf = joined;
+
+        while (true) {
+          const hdrEnd = indexOf(buf, CRLF2, 0);
+          if (hdrEnd < 0) {
+            if (buf.length > 1024) buf = buf.slice(buf.length - 3);  // garbage, resync
+            break;
+          }
+          const m = /Content-Length:\s*(\d+)/i.exec(decoder.decode(buf.subarray(0, hdrEnd)));
+          const start = hdrEnd + 4;
+          if (!m) { buf = buf.slice(start); continue; }
+          const len = parseInt(m[1]);
+          if (buf.length < start + len) break;   // frame not complete yet
+          showFrame(el, buf.slice(start, start + len));
+          buf = buf.slice(start + len);
+        }
+      }
+    }
+
+    function showFrame(el, jpg) {
+      el._lastFrame = Date.now();
+      const old = el._url;
+      el._url = URL.createObjectURL(new Blob([jpg], {type: 'image/jpeg'}));
+      el.src = el._url;
+      if (old) URL.revokeObjectURL(old);
+    }
+
+    // reopen streams that stopped delivering frames
+    setInterval(() => {
+      for (const el of [img, img2]) {
+        if (el._ctrl && Date.now() - el._lastFrame > STALL_MS) el._ctrl.abort();
+      }
+    }, 500);
+
+    // phone screen off / tab in background: close the streams (frees the
+    // connections on the ESP), reopen them when the page is visible again
+    document.addEventListener('visibilitychange', () => {
+      for (const el of [img, img2]) {
+        if (document.hidden) stopStream(el);
+        else startStream(el);
+      }
+    });
+
+
+    /* ---------- camera parameters ---------- */
+
+    // cameras the parameter controls act on
+    function targets() {
+      if (camState == 1) return [c];
+      if (camState == 2) return [c2];
+      return [c, c2];
+    }
+
+    // one request in flight per camera; while it runs only the newest
+    // value of every parameter is kept and sent afterwards
+    const queues = {};
+
+    function sendSet(param, value) {
+      for (const ip of targets()) {
+        const q = queues[ip] = queues[ip] || {busy: false, pending: {}};
+        q.pending[param] = value;
+        flush(ip);
+      }
+    }
+
+    function flush(ip) {
+      const q = queues[ip];
+      if (q.busy) return;
+      const params = Object.keys(q.pending);
+      if (params.length == 0) return;
+      const param = params[0];
+      const value = q.pending[param];
+      delete q.pending[param];
+      q.busy = true;
+      fetch(`http://${ip}/camera?set=${param}&value=${value}`, {mode: "cors"})
         .then(r => r.json())
-        .then(d => {
-          current = d.quality;
-          allAuto = d.allAuto;
-          exposure = d.exposure;
-          currentFrame = d.framesize;
-          document.getElementById('qval').innerText = current;
+        .then(d => { if (ip == targets()[0] && Object.keys(q.pending).length == 0) showParam(d); })
+        .catch(() => {})
+        .finally(() => { q.busy = false; flush(ip); });
+    }
 
-          // Update button text
-          document.getElementById('autoBtn').innerText =
-              "AUTO: " + (allAuto ? "ON" : "OFF");
+    function showParam(d) {
+      if (d.quality === undefined) return;
+      current = d.quality;
+      allAuto = d.allAuto;
+      exposure = d.exposure;
+      if (d.maxFramesize !== undefined) maxFrame = d.maxFramesize;
 
-          // Update slider
-          document.getElementById('expSlider').value = exposure;
-          document.getElementById('expVal').innerText = exposure;
+      document.getElementById('qval').innerText = current;
+      document.getElementById('autoBtn').innerText = "AUTO: " + (allAuto ? "ON" : "OFF");
 
-          // Update frameslider
-          document.getElementById('frameSlider').value = currentFrame;
-          document.getElementById('frameVal').innerText = currentFrame;
+      document.getElementById('expSlider').value = exposure;
+      document.getElementById('expVal').innerText = exposure;
 
-        });
+      const fs = document.getElementById('frameSlider');
+      fs.max = maxFrame;
+      fs.value = d.framesize;
+      document.getElementById('frameVal').innerText = d.framesize;
+    }
+
+    function refreshCameraParam() {
+      return fetch(`http://${targets()[0]}/camera`, {mode: "cors"})
+        .then(r => r.json())
+        .then(showParam)
+        .catch(() => {});
+    }
+
+    function refreshSecondCamera() {
+      return fetch(`http://${c}/camera`, {mode: "cors"})
+        .then(r => r.json())
+        .then(d => { c2 = d.ipCam2; })
+        .catch(() => {});
     }
 
     function changeQuality(delta) {
       current += delta;
       if(current < 10) current = 10;
       if(current > 63) current = 63;
-      fetch(`http://${cMod}/camera?set=quality&value=${current}`, {mode: "cors"})
-        .then(r => r.json())
-        .then(d => refreshCameraParam());
+      document.getElementById('qval').innerText = current;
+      sendSet('quality', current);
     }
 
-    function setFrame(currentFrame) {
-      if(currentFrame < 0) currentFrame = 0;
-      if(currentFrame > 9) currentFrame = 9;
-      fetch(`http://${cMod}/camera?set=framesize&value=${currentFrame}`, {mode: "cors"})
-        .then(r => r.json())
-        .then(d => refreshCameraParam());
-    }
-
-
-
-    function changeCam() {
-      refreshSecondCamera();
-      if(c2 !='0') camState += 1;
-      if(camState > 3) camState = 1;
-      document.getElementById('camSel').innerText = 'Camera ' +  camState;
-      if(camState==1){
-        img.src=`http://${c}:81/stream`;
-        img2.src=``;
-        cMod = c;
-      }
-      if(camState==2){
-        img.src=`http://${c2}:81/stream`;
-        img2.src=``;
-        cMod = c2;
-      }
-      if(camState==3){
-        img.src=`http://${c}:81/stream`;
-        img2.src=`http://${c2}:81/stream`;
-        cMod = '0';
-      }
-      document.getElementById('camval').innerText = cMod
-      refreshCameraParam();   
+    function setFrame(val) {
+      val = Math.max(0, Math.min(maxFrame, parseInt(val)));
+      document.getElementById('frameVal').innerText = val;
+      sendSet('framesize', val);
     }
 
     // Toggle auto / manual
     function toggleAuto() {
-        let newVal = allAuto ? 0 : 1;
-        fetch(`http://${cMod}/camera?set=allAuto&value=${newVal}`)
-            .then(r => r.json())
-            .then(() => refreshCameraParam());
+      allAuto = allAuto ? 0 : 1;
+      document.getElementById('autoBtn').innerText = "AUTO: " + (allAuto ? "ON" : "OFF");
+      sendSet('allAuto', allAuto);
     }
 
     // Set manual exposure
     function setExposure(val) {
-        document.getElementById('expVal').innerText = val;
-
-        fetch(`http://${cMod}/camera?set=exposure&value=${val}`)
-            .then(r => r.json())
-            .then(() => refreshCameraParam());
+      document.getElementById('expVal').innerText = val;
+      sendSet('exposure', val);
     }
-    
+
+
+    /* ---------- camera selection ---------- */
+
+    function showCamState() {
+      document.getElementById('camSel').innerText = 'Camera ' + (camState == 3 ? '1 + 2' : camState);
+      document.getElementById('camval').innerText = targets().join(' + ');
+      if (camState == 1) { setStream(img, c);  setStream(img2, null); }
+      if (camState == 2) { setStream(img, c2); setStream(img2, null); }
+      if (camState == 3) { setStream(img, c);  setStream(img2, c2); }
+      refreshCameraParam();
+    }
+
+    async function changeCam() {
+      await refreshSecondCamera();
+      camState = (c2 != '0') ? camState + 1 : 1;
+      if (camState > 3) camState = 1;
+      showCamState();
+    }
+
+    showCamState();
+    refreshSecondCamera();
+
   </script>
-  </html>    
+  </html>
