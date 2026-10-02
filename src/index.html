@@ -15,6 +15,27 @@
   .vertical-container img {
     max-width: 100%;
   }
+  .led-panel {
+    margin: 20px;
+    padding: 10px;
+    border: 1px solid #888;
+    border-radius: 8px;
+    max-width: 400px;
+  }
+  .led-panel input[type=range] {
+    width: 100%;
+  }
+  .led-panel button {
+    padding: 10px;
+    margin: 5px 5px 0 0;
+    border: none;
+    border-radius: 6px;
+    color: #fff;
+  }
+  .led-red   { background: #c00; }
+  .led-green { background: #0a0; }
+  .led-blue  { background: #06c; }
+  .led-white { background: #aaa; color: #000 !important; }
   </style>
   <body>
 
@@ -25,6 +46,7 @@
         <button id='camSel' onclick='changeCam()' style='padding:10px;margin:5px;'>Camera 1 </button>
     </div>
     <p>Camera: <span id='camval'>...</span></p>
+    <p>Stream: <span id='fpsval'>...</span></p>
     <div style="display:flex; align-items:center; gap:10px;">
       <button onclick='changeQuality(-5)' style='padding:10px;margin:5px;'>Increase Quality</button>
       <span id='qval'> JPEG Quality: ... </span>
@@ -39,6 +61,12 @@
         FrameSize: <span id="frameVal">...</span><br>
         <input type="range" id="frameSlider" min="0" max="5" value="5" oninput="setFrame(this.value)">
     </div>
+    <div style="margin:20px;">
+        Max FPS: <span id="fpsLimitVal">...</span><br>
+        <input type="range" id="fpsSlider" min="1" max="30" value="12" oninput="setFps(this.value)">
+    </div>
+    <!-- one panel per registered LED board, filled by renderLeds() -->
+    <div id="leds"></div>
 
 
   </body>
@@ -50,8 +78,10 @@
     const ctx = cnvs.getContext("2d");
     var moving = false;
     var c='192.168.4.1';
-    var c2 = '0';
-    var camState = 1; // state of the image 1 .. cam1, 2 .. cam 2, 3 .. cam1 and cam2
+    // all cameras, camera 1 is the access point, the others come from its list
+    let camList = [{n: 1, ip: c}];
+    let selected = 1;   // number of the shown camera, or 'all'
+    const imgs = [img, img2];   // more <img> are added when more cameras are shown
     //var c='http://esp32.local'
     //var c=document.location.origin
     let allAuto = 1;
@@ -155,7 +185,9 @@
 
     // start (ip given) or stop (ip null) the stream shown in an <img>
     function setStream(el, ip) {
+      if (el._ip == ip && el._ctrl) return;   // already streaming this camera
       el._ip = ip;
+      el._reconnects = 0;
       startStream(el);
     }
 
@@ -184,6 +216,7 @@
         .finally(() => {
           if (el._ctrl !== ctrl) return;      // stopped or replaced meanwhile
           el._ctrl = null;
+          el._reconnects = (el._reconnects || 0) + 1;
           el._retry = setTimeout(() => startStream(el), RETRY_MS);
         });
     }
@@ -200,7 +233,9 @@
 
     // each part: --boundary\r\nContent-Type: ...\r\nContent-Length: N\r\n\r\n<N bytes jpeg>\r\n
     async function readStream(el, ip, signal) {
-      const r = await fetch(`http://${ip}:81/stream?t=${Date.now()}`, {signal, cache: 'no-store'});
+      // raw=1: same frames without the multipart content type, which Safari would split itself.
+      // no cache option: the ?t= already avoids caching, and Safari would send a preflight for it
+      const r = await fetch(`http://${ip}:81/stream?raw=1&t=${Date.now()}`, {signal});
       if (!r.ok || !r.body) throw new Error('stream http ' + r.status);
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
@@ -231,16 +266,42 @@
     }
 
     function showFrame(el, jpg) {
-      el._lastFrame = Date.now();
+      const now = Date.now();
+      const s = el._stat;
+      if (s) {
+        s.frames++;
+        s.bytes += jpg.length;
+        s.maxGap = Math.max(s.maxGap, now - el._lastFrame);
+      }
+      el._lastFrame = now;
       const old = el._url;
       el._url = URL.createObjectURL(new Blob([jpg], {type: 'image/jpeg'}));
       el.src = el._url;
       if (old) URL.revokeObjectURL(old);
     }
 
+    // every second: frame rate, data rate and the longest pause between two
+    // frames of each stream (a pause still running counts as well)
+    setInterval(() => {
+      const now = Date.now();
+      const lines = [];
+      for (const el of imgs) {
+        const s = el._stat;
+        if (s && el._ip && el._ip != '0' && !document.hidden) {
+          const dt = (now - s.t) / 1000;
+          const gap = el._ctrl ? Math.max(s.maxGap, now - el._lastFrame) : s.maxGap;
+          lines.push(`Cam ${el._n} (${el._ip}): ${(s.frames / dt).toFixed(1)} fps, ` +
+                     `${(s.bytes / 1024 / dt).toFixed(0)} kB/s, ` +
+                     `max gap ${gap} ms, ${el._reconnects || 0} reconnects`);
+        }
+        el._stat = {t: now, frames: 0, bytes: 0, maxGap: 0};
+      }
+      document.getElementById('fpsval').innerText = lines.length ? lines.join('\n') : '-';
+    }, 1000);
+
     // reopen streams that stopped delivering frames
     setInterval(() => {
-      for (const el of [img, img2]) {
+      for (const el of imgs) {
         if (el._ctrl && Date.now() - el._lastFrame > STALL_MS) el._ctrl.abort();
       }
     }, 500);
@@ -248,7 +309,7 @@
     // phone screen off / tab in background: close the streams (frees the
     // connections on the ESP), reopen them when the page is visible again
     document.addEventListener('visibilitychange', () => {
-      for (const el of [img, img2]) {
+      for (const el of imgs) {
         if (document.hidden) stopStream(el);
         else startStream(el);
       }
@@ -259,25 +320,26 @@
 
     // cameras the parameter controls act on
     function targets() {
-      if (camState == 1) return [c];
-      if (camState == 2) return [c2];
-      return [c, c2];
+      if (selected == 'all') return camList.map(cam => cam.ip);
+      const cam = camList.find(cam => cam.n == selected);
+      return [cam ? cam.ip : c];
     }
 
-    // one request in flight per camera; while it runs only the newest
-    // value of every parameter is kept and sent afterwards
+    // one request in flight per device; while it runs only the newest
+    // value of every parameter is kept and sent afterwards.
+    // onReply gets the JSON answer once nothing is pending any more
     const queues = {};
 
-    function sendSet(param, value) {
-      for (const ip of targets()) {
-        const q = queues[ip] = queues[ip] || {busy: false, pending: {}};
-        q.pending[param] = value;
-        flush(ip);
-      }
+    function queueSet(ip, path, param, value, onReply) {
+      const key = ip + '/' + path;
+      const q = queues[key] = queues[key] || {busy: false, pending: {}};
+      q.pending[param] = value;
+      q.onReply = onReply;
+      flush(key, ip, path);
     }
 
-    function flush(ip) {
-      const q = queues[ip];
+    function flush(key, ip, path) {
+      const q = queues[key];
       if (q.busy) return;
       const params = Object.keys(q.pending);
       if (params.length == 0) return;
@@ -285,11 +347,17 @@
       const value = q.pending[param];
       delete q.pending[param];
       q.busy = true;
-      fetch(`http://${ip}/camera?set=${param}&value=${value}`, {mode: "cors"})
+      fetch(`http://${ip}/${path}?set=${param}&value=${value}`, {mode: "cors"})
         .then(r => r.json())
-        .then(d => { if (ip == targets()[0] && Object.keys(q.pending).length == 0) showParam(d); })
+        .then(d => { if (Object.keys(q.pending).length == 0 && q.onReply) q.onReply(d); })
         .catch(() => {})
-        .finally(() => { q.busy = false; flush(ip); });
+        .finally(() => { q.busy = false; flush(key, ip, path); });
+    }
+
+    function sendSet(param, value) {
+      for (const ip of targets()) {
+        queueSet(ip, 'camera', param, value, d => { if (ip == targets()[0]) showParam(d); });
+      }
     }
 
     function showParam(d) {
@@ -309,6 +377,13 @@
       fs.max = maxFrame;
       fs.value = d.framesize;
       document.getElementById('frameVal').innerText = d.framesize;
+
+      if (d.fps !== undefined) {
+        const ps = document.getElementById('fpsSlider');
+        ps.max = d.maxFpsLimit;
+        ps.value = d.fps;
+        document.getElementById('fpsLimitVal').innerText = d.fps;
+      }
     }
 
     function refreshCameraParam() {
@@ -318,11 +393,55 @@
         .catch(() => {});
     }
 
-    function refreshSecondCamera() {
+    // camera 1 knows all other cameras
+    function refreshCameraList() {
       return fetch(`http://${c}/camera`, {mode: "cors"})
         .then(r => r.json())
-        .then(d => { c2 = d.ipCam2; })
+        .then(d => {
+          if (d.cams) camList = [{n: 1, ip: c}, ...d.cams];
+          if (d.leds) ledList = d.leds;
+        })
         .catch(() => {});
+    }
+
+
+    /* ---------- LED boards (ledCom firmware) ---------- */
+
+    let ledList = [];        // [{n: 1, ip: '192.168.4.5'}, ...] from camera 1
+    const LED_COLORS = ['red', 'green', 'blue', 'white'];
+
+    // one control panel per LED board, talking directly to http://<ip>/led
+    function renderLeds() {
+      const box = document.getElementById('leds');
+      box.innerHTML = '';
+      for (const led of ledList) {
+        const panel = document.createElement('div');
+        panel.className = 'led-panel';
+        panel.innerHTML =
+          `<b>LED ${led.n}</b> (${led.ip}) &nbsp; Color: <span class="cval">?</span><br>` +
+          `Brightness: <span class="bval">?</span><br>` +
+          `<input type="range" min="1" max="255" class="bslider">` +
+          LED_COLORS.map(col => `<button class="led-${col}" data-color="${col}">${col}</button>`).join('');
+        box.appendChild(panel);
+
+        const show = d => {
+          if (d.brightness === undefined) return;
+          panel.querySelector('.bslider').value = d.brightness;
+          panel.querySelector('.bval').innerText = d.brightness;
+          panel.querySelector('.cval').innerText = d.color;
+        };
+        panel.querySelector('.bslider').oninput = e => {
+          panel.querySelector('.bval').innerText = e.target.value;
+          queueSet(led.ip, 'led', 'brightness', e.target.value, show);
+        };
+        for (const b of panel.querySelectorAll('button')) {
+          b.onclick = () => queueSet(led.ip, 'led', 'color', b.dataset.color, show);
+        }
+        fetch(`http://${led.ip}/led`, {mode: "cors"})
+          .then(r => r.json())
+          .then(show)
+          .catch(() => {});
+      }
     }
 
     function changeQuality(delta) {
@@ -337,6 +456,12 @@
       val = Math.max(0, Math.min(maxFrame, parseInt(val)));
       document.getElementById('frameVal').innerText = val;
       sendSet('framesize', val);
+    }
+
+    // frames per second each camera sends, lower = less WiFi load
+    function setFps(val) {
+      document.getElementById('fpsLimitVal').innerText = val;
+      sendSet('fps', val);
     }
 
     // Toggle auto / manual
@@ -355,24 +480,52 @@
 
     /* ---------- camera selection ---------- */
 
+    // n-th <img>, created when not there yet
+    function getImg(i) {
+      while (imgs.length <= i) {
+        const el = document.createElement('img');
+        el.alt = '';
+        document.getElementById('camSel').before(el);
+        imgs.push(el);
+      }
+      return imgs[i];
+    }
+
     function showCamState() {
-      document.getElementById('camSel').innerText = 'Camera ' + (camState == 3 ? '1 + 2' : camState);
+      if (selected != 'all' && !camList.some(cam => cam.n == selected)) selected = 1;
+      if (selected == 'all' && camList.length < 2) selected = 1;
+      const shown = (selected == 'all') ? camList : camList.filter(cam => cam.n == selected);
+
+      document.getElementById('camSel').innerText = (selected == 'all') ? 'All cameras' : 'Camera ' + selected;
       document.getElementById('camval').innerText = targets().join(' + ');
-      if (camState == 1) { setStream(img, c);  setStream(img2, null); }
-      if (camState == 2) { setStream(img, c2); setStream(img2, null); }
-      if (camState == 3) { setStream(img, c);  setStream(img2, c2); }
+      for (let i = 0; i < Math.max(imgs.length, shown.length); i++) {
+        const el = getImg(i);
+        el._n = shown[i] ? shown[i].n : 0;
+        setStream(el, shown[i] ? shown[i].ip : null);
+      }
       refreshCameraParam();
     }
 
+    // Camera 1 -> 2 -> ... -> All cameras -> Camera 1
     async function changeCam() {
-      await refreshSecondCamera();
-      camState = (c2 != '0') ? camState + 1 : 1;
-      if (camState > 3) camState = 1;
+      await refreshCameraList();
+      const order = camList.map(cam => cam.n);
+      if (order.length > 1) order.push('all');
+      selected = order[(order.indexOf(selected) + 1) % order.length];
       showCamState();
     }
 
+    // cameras come and go: keep the list current
+    setInterval(async () => {
+      const camsBefore = JSON.stringify(camList);
+      const ledsBefore = JSON.stringify(ledList);
+      await refreshCameraList();
+      if (JSON.stringify(camList) != camsBefore) showCamState();
+      if (JSON.stringify(ledList) != ledsBefore) renderLeds();
+    }, 5000);
+
     showCamState();
-    refreshSecondCamera();
+    refreshCameraList().then(renderLeds);
 
   </script>
   </html>

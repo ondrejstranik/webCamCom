@@ -43,7 +43,10 @@ String ipAP = "192.168.4.1";
 #define STA_CONNECT_TIMEOUT_MS 10000    // how long to look for an existing access point at boot
 #define STA_LOST_RESTART_MS 30000       // station: restart (and re-decide the role) after this long without the access point
 #define REGISTER_INTERVAL_MS 5000       // station: how often the own ip is sent to the access point
-#define CAM2_TIMEOUT_MS 15000           // access point: forget the second camera when it was not heard for this long
+#define CAM_TIMEOUT_MS 15000            // access point: forget a station camera / LED board when it was not heard for this long
+#define MAX_CAMERAS 5                   // access point camera (number 1) + up to 4 station cameras
+#define MAX_LEDS 2                      // LED boards (ledCom firmware) that can register
+#define MAX_WIFI_CLIENTS 8              // devices on the access point: station cameras + phones/computers
 // access point: how often to look for a second access point with the same name.
 // a duplicate can only appear when both cameras start together, and every scan
 // pauses the access point shortly, so scan often only during the first minutes
@@ -51,24 +54,79 @@ String ipAP = "192.168.4.1";
 #define AP_SCAN_INTERVAL_LATE_MS 60000
 #define AP_SCAN_FAST_PERIOD_MS 120000
 
-// ip of the second camera ("0" = none), on the station camera its own ip.
-// written by the http task and read by loop(), therefore guarded by ipCam2Mux
-static char ipCam2[16] = "0";
-static portMUX_TYPE ipCam2Mux = portMUX_INITIALIZER_UNLOCKED;
-static volatile uint32_t cam2LastSeen = 0;
+// own camera number, shown by the LED blinking: 1 = access point,
+// 2.. = assigned by the access point at registration, 0 = not known yet
+static volatile int camNumber = 0;
 
-static void setIpCam2(const char *ip)
+// access point: the devices that registered (station cameras and LED boards).
+// slot i of a list is device number i + firstNumber.
+// written by the http task (registration) and loop() (timeout), guarded by devMux
+#define MAX_SLOTS 4
+struct Slot {
+  char ip[16];          // "" = slot free
+  uint32_t lastSeen;    // millis() of the last registration
+};
+struct DeviceList {
+  const char *name;     // for the serial log
+  int firstNumber;
+  int count;
+  Slot slots[MAX_SLOTS];
+};
+static DeviceList cams = {"camera", 2, MAX_CAMERAS - 1, {}};
+static DeviceList leds = {"LED", 1, MAX_LEDS, {}};
+static portMUX_TYPE devMux = portMUX_INITIALIZER_UNLOCKED;
+
+// returns the device number for ip (an ip keeps its number while it registers
+// regularly), 0 when all slots are taken
+static int registerDevice(DeviceList &list, const char *ip)
 {
-  portENTER_CRITICAL(&ipCam2Mux);
-  strlcpy(ipCam2, ip, sizeof(ipCam2));
-  portEXIT_CRITICAL(&ipCam2Mux);
+  int slot = -1;
+  portENTER_CRITICAL(&devMux);
+  int freeSlot = -1;
+  for (int i = 0; i < list.count; i++) {
+    if (strcmp(list.slots[i].ip, ip) == 0) { slot = i; break; }
+    if (list.slots[i].ip[0] == 0 && freeSlot < 0) freeSlot = i;
+  }
+  if (slot < 0 && freeSlot >= 0) {
+    slot = freeSlot;
+    strlcpy(list.slots[slot].ip, ip, sizeof(list.slots[slot].ip));
+  }
+  if (slot >= 0) list.slots[slot].lastSeen = millis();
+  portEXIT_CRITICAL(&devMux);
+  return slot < 0 ? 0 : slot + list.firstNumber;
 }
 
-static void getIpCam2(char *out)
+// free the slots of devices that stopped registering
+static void expireDevices(DeviceList &list)
 {
-  portENTER_CRITICAL(&ipCam2Mux);
-  strlcpy(out, ipCam2, sizeof(ipCam2));
-  portEXIT_CRITICAL(&ipCam2Mux);
+  uint32_t now = millis();
+  for (int i = 0; i < list.count; i++) {
+    bool expired = false;
+    portENTER_CRITICAL(&devMux);
+    if (list.slots[i].ip[0] != 0 && now - list.slots[i].lastSeen > CAM_TIMEOUT_MS) {
+      list.slots[i].ip[0] = 0;
+      expired = true;
+    }
+    portEXIT_CRITICAL(&devMux);
+    if (expired) Serial.printf("%s %d lost\n", list.name, i + list.firstNumber);
+  }
+}
+
+// JSON list of the registered devices: [{"n":2,"ip":"192.168.4.2"},...]
+static void devicesJson(DeviceList &list, char *out, size_t size)
+{
+  Slot copy[MAX_SLOTS];
+  portENTER_CRITICAL(&devMux);
+  memcpy(copy, list.slots, sizeof(copy));
+  portEXIT_CRITICAL(&devMux);
+
+  size_t used = snprintf(out, size, "[");
+  for (int i = 0; i < list.count && used < size; i++) {
+    if (copy[i].ip[0] == 0) continue;
+    used += snprintf(out + used, size - used, "%s{\"n\":%d,\"ip\":\"%s\"}",
+                     used > 1 ? "," : "", i + list.firstNumber, copy[i].ip);
+  }
+  if (used < size) snprintf(out + used, size - used, "]");
 }
 //IPAddress ip(192,168,1,200);     
 //PAddress gateway(192,168,1,1);   
@@ -93,12 +151,37 @@ uint32_t yPosition = 200;
 #define MAX_STREAM_CLIENTS 4       // simultaneous /stream viewers (phone, python, ...)
 #define MAX_FRAMESIZE 5            // largest allowed framesize_t index (5 = FRAMESIZE_QVGA, 320x240)
 #define DEFAULT_QUALITY 20         // jpeg quality 1 (best) - 63 (worst)
+#define DEFAULT_MAX_FPS 12         // frames per second sent to every viewer, limits the WiFi load
+#define MAX_FPS_LIMIT 30
+
+static volatile int maxFps = DEFAULT_MAX_FPS;
 
 static const char* _STREAM_HEADER =
   "HTTP/1.1 200 OK\r\n"
   "Content-Type: multipart/x-mixed-replace;boundary=" PART_BOUNDARY "\r\n"
   "Access-Control-Allow-Origin: *\r\n"
   "Cache-Control: no-cache, no-store\r\n"
+  "Connection: close\r\n"
+  "\r\n";
+// same frames, but a neutral content type for the web page, which reads the
+// stream with fetch(): Safari splits multipart/x-mixed-replace itself and
+// then fetch() does not get the stream
+static const char* _STREAM_HEADER_RAW =
+  "HTTP/1.1 200 OK\r\n"
+  "Content-Type: application/octet-stream\r\n"
+  "X-Content-Type-Options: nosniff\r\n"
+  "Access-Control-Allow-Origin: *\r\n"
+  "Cache-Control: no-cache, no-store\r\n"
+  "Connection: close\r\n"
+  "\r\n";
+// answer to a CORS preflight request (some browsers send one before the stream)
+static const char* _STREAM_OPTIONS =
+  "HTTP/1.1 204 No Content\r\n"
+  "Access-Control-Allow-Origin: *\r\n"
+  "Access-Control-Allow-Methods: GET, OPTIONS\r\n"
+  "Access-Control-Allow-Headers: *\r\n"
+  "Access-Control-Max-Age: 600\r\n"
+  "Content-Length: 0\r\n"
   "Connection: close\r\n"
   "\r\n";
 static const char* _STREAM_PART = "--" PART_BOUNDARY "\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
@@ -159,6 +242,31 @@ static esp_err_t ping_handler(httpd_req_t *req)
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   const char *resp = "{\"status\":\"ok\",\"ping\":1}";
   return httpd_resp_send(req, resp, strlen(resp));
+}
+
+// Handler for "/register?ip=192.168.4.2[&type=led]" (access point only): a station
+// camera or an LED board announces itself and gets its number back,
+// {"number":2} (0 = no free slot)
+static esp_err_t register_handler(httpd_req_t *req)
+{
+  char query[64];
+  char ipStr[16];
+  char type[8] = "";
+  int number = 0;
+  IPAddress ip;
+  if (access_point == 1 &&
+      httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+      httpd_query_key_value(query, "ip", ipStr, sizeof(ipStr)) == ESP_OK &&
+      ip.fromString(ipStr)) {
+    httpd_query_key_value(query, "type", type, sizeof(type));
+    number = registerDevice(strcmp(type, "led") == 0 ? leds : cams, ipStr);
+  }
+
+  char resp[32];
+  snprintf(resp, sizeof(resp), "{\"number\":%d}", number);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  return httpd_resp_sendstr(req, resp);
 }
 
 // Handler for Camera Control "/camera /camera?set=quality&value=30"
@@ -247,12 +355,10 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         else if (strcmp(param, "allAuto") == 0) {
           setAllAuto(value);
         }
-        else if (strcmp(param, "ip") == 0) {
-            IPAddress ip;
-            if (ip.fromString(value_str)) {
-                setIpCam2(value_str);
-                cam2LastSeen = millis();
-            }
+        else if (strcmp(param, "fps") == 0) {
+          if (value < 1) value = 1;
+          if (value > MAX_FPS_LIMIT) value = MAX_FPS_LIMIT;
+          maxFps = value;
         }
         else {
             httpd_resp_set_type(req, "application/json");
@@ -273,18 +379,22 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
     int saturation   = s->status.saturation;
     int framesize    = s->status.framesize;
 
-    char ip2[16];
-    getIpCam2(ip2);
+    char camList[160];
+    devicesJson(cams, camList, sizeof(camList));
+    char ledList[100];
+    devicesJson(leds, ledList, sizeof(ledList));
 
-    char json[256];
+    char json[580];
     snprintf(json, sizeof(json),
         "{\"quality\":%d,\"exposure\":%d,\"auto_exposure\":%d,"
         "\"gain\":%d,\"brightness\":%d,\"contrast\":%d,"
         "\"saturation\":%d,\"framesize\":%d,\"maxFramesize\":%d,"
-        "\"allAuto\":%d,\"ipCam2\":\"%s\",\"streamClients\":%d}",
+        "\"allAuto\":%d,\"number\":%d,\"cams\":%s,\"leds\":%s,\"streamClients\":%d,"
+        "\"fps\":%d,\"maxFpsLimit\":%d}",
         quality, exposure, auto_exp,
         gain, brightness, contrast, saturation, framesize, MAX_FRAMESIZE,
-        allAuto, ip2, streamClients.load()
+        allAuto, camNumber, camList, ledList, streamClients.load(),
+        maxFps, MAX_FPS_LIMIT
     );
 
     httpd_resp_set_type(req, "application/json");
@@ -403,19 +513,28 @@ static bool sendStr(int sock, const char *str)
   return sendAll(sock, (const uint8_t *)str, strlen(str));
 }
 
-// read the HTTP request header, return true if it asks for /stream
-static bool readStreamRequest(int sock)
+enum StreamRequest { REQ_INVALID, REQ_STREAM, REQ_STREAM_RAW, REQ_OPTIONS };
+
+// read the HTTP request header and tell what it asks for:
+// GET /stream (multipart), GET /stream?raw=1 (for the web page), OPTIONS (CORS preflight)
+static StreamRequest readStreamRequest(int sock)
 {
-  char req[512];
+  char req[1024];
   size_t used = 0;
   while (used < sizeof(req) - 1) {
     int n = recv(sock, req + used, sizeof(req) - 1 - used, 0);
-    if (n <= 0) return false;
+    if (n <= 0) return REQ_INVALID;
     used += n;
     req[used] = 0;
     if (strstr(req, "\r\n\r\n")) break;
   }
-  return strncmp(req, "GET /stream", 11) == 0;
+
+  // only the request line matters
+  char *lineEnd = strstr(req, "\r\n");
+  if (lineEnd) *lineEnd = 0;
+  if (strncmp(req, "OPTIONS ", 8) == 0) return REQ_OPTIONS;
+  if (strncmp(req, "GET /stream", 11) != 0) return REQ_INVALID;
+  return strstr(req, "raw=1") ? REQ_STREAM_RAW : REQ_STREAM;
 }
 
 static void streamClientTask(void *arg)
@@ -424,17 +543,23 @@ static void streamClientTask(void *arg)
   uint8_t *buf = NULL;
   size_t cap = 0;
   uint32_t lastId = 0;
+  TickType_t lastSend = 0;
   char part[96];
 
-  if (!readStreamRequest(sock)) {
+  StreamRequest request = readStreamRequest(sock);
+  if (request == REQ_OPTIONS) {
+    sendStr(sock, _STREAM_OPTIONS);
+  } else if (request == REQ_INVALID) {
     sendStr(sock, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-  } else if (sendStr(sock, _STREAM_HEADER)) {
+  } else if (sendStr(sock, request == REQ_STREAM_RAW ? _STREAM_HEADER_RAW : _STREAM_HEADER)) {
     while (true) {
-      // wait for a frame newer than the last one sent
-      if (frameId == lastId) {
+      // wait for a frame newer than the last one sent, but send not more than maxFps
+      if (frameId == lastId ||
+          xTaskGetTickCount() - lastSend < pdMS_TO_TICKS(1000 / maxFps)) {
         vTaskDelay(pdMS_TO_TICKS(5));
         continue;
       }
+      lastSend = xTaskGetTickCount();
 
       // copy the latest frame, so the network send does not block the capture
       xSemaphoreTake(frameMutex, portMAX_DELAY);
@@ -539,6 +664,13 @@ httpd_uri_t ping_uri = {
     .user_ctx  = NULL
 };
 
+httpd_uri_t register_uri = {
+    .uri       = "/register",
+    .method    = HTTP_GET,
+    .handler   = register_handler,
+    .user_ctx  = NULL
+};
+
 httpd_uri_t cam_ctrl = {
     .uri = "/camera",
     .method = HTTP_GET,
@@ -551,6 +683,7 @@ httpd_uri_t cam_ctrl = {
   if (httpd_start(&camera_httpd, &config) == ESP_OK) {
     httpd_register_uri_handler(camera_httpd, &index_uri);
     httpd_register_uri_handler(camera_httpd, &ping_uri);
+    httpd_register_uri_handler(camera_httpd, &register_uri);
     httpd_register_uri_handler(camera_httpd, &cam_ctrl);
   }
 
@@ -573,19 +706,24 @@ void setupmDNS(){
   Serial.println(".local");
 };
 
-// station: tell the access point camera our ip, repeated so it is
-// renewed after a reconnect or a restart of the access point
+// station: tell the access point camera our ip and get our camera number back,
+// repeated so it is renewed after a reconnect or a restart of the access point
 void registerAtAP(){
   String ip = WiFi.localIP().toString();
-  setIpCam2(ip.c_str());
 
   HTTPClient http;
   http.setConnectTimeout(1000);
   http.setTimeout(1000);
-  http.begin("http://" + ipAP + "/camera?set=ip&value=" + ip);
+  http.begin("http://" + ipAP + "/register?ip=" + ip);
   int httpCode = http.GET();
-  if (httpCode <= 0) {
-    Serial.printf("sending IP to AP failed: %s\n", http.errorToString(httpCode).c_str());
+  if (httpCode == 200) {
+    int number = 0;
+    if (sscanf(http.getString().c_str(), "{\"number\":%d", &number) == 1) {
+      if (number != camNumber) Serial.printf("camera number: %d\n", number);
+      camNumber = number;
+    }
+  } else {
+    Serial.printf("registering at AP failed: %s\n", http.errorToString(httpCode).c_str());
   }
   http.end();
 }
@@ -628,7 +766,9 @@ void connectToWifi(){
     Serial.println("");
     Serial.println("WiFi connected");
     access_point = 0;
-    host = "esp32-cam2";            // the access point camera already uses "esp32"
+    // the access point camera already uses "esp32", make the name unique with the MAC
+    host = "esp32-" + WiFi.macAddress().substring(12, 14) + WiFi.macAddress().substring(15, 17);
+    host.toLowerCase();
     WiFi.setAutoReconnect(true);
 
     registerAtAP();
@@ -642,12 +782,13 @@ void connectToWifi(){
     WiFi.disconnect();
     // AP + STA, so the camera can scan for a second access point (see checkDuplicateAP)
     WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(ssid, password, WIFI_CHANNEL, 0, 4);
+    WiFi.softAP(ssid, password, WIFI_CHANNEL, 0, MAX_WIFI_CLIENTS);
     WiFi.setSleep(false);
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
     Serial.print("[+] AP Created with IP Gateway ");
     Serial.println(WiFi.softAPIP());
     access_point= 1;
+    camNumber = 1;
   }
 
   // Start streaming web server
@@ -663,11 +804,8 @@ void maintainWifi(){
   uint32_t now = millis();
 
   if (access_point == 1) {
-    if (cam2LastSeen != 0 && now - cam2LastSeen > CAM2_TIMEOUT_MS) {
-      Serial.println("second camera lost");
-      setIpCam2("0");
-      cam2LastSeen = 0;
-    }
+    expireDevices(cams);
+    expireDevices(leds);
     uint32_t scanInterval = (now < AP_SCAN_FAST_PERIOD_MS) ? AP_SCAN_INTERVAL_MS : AP_SCAN_INTERVAL_LATE_MS;
     if (now - lastScan > scanInterval) {
       lastScan = now;
@@ -782,11 +920,6 @@ void loop() {
  if (access_point == 1) {
     Serial.print("[+] AP Created with IP Gateway ");
     Serial.println(WiFi.softAPIP());
-
-  // make one LED flash
-  digitalWrite(LED_BUILTIN, LOW);  // turn the LED on (HIGH is the voltage level)
-  delay(200);                         // wait
-  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED off by making the voltage LOW
   }
  else {
     Serial.print("[+] camera IP: ");
@@ -795,14 +928,22 @@ void loop() {
     Serial.println(ssid);
     Serial.print("WIFI strength: ");
     Serial.println (WiFi.RSSI());
-  // make two LED flash
-  digitalWrite(LED_BUILTIN, LOW);  // turn the LED on (HIGH is the voltage level)
-  delay(200);                         // wait
-  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED off by making the voltage LOW
-  delay(200);                         // wait
-  digitalWrite(LED_BUILTIN, LOW);  // turn the LED on (HIGH is the voltage level)
-  delay(200);                         // wait
-  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED off by making the voltage LOW
+  }
+  Serial.printf("camera number: %d\n", camNumber);
+
+  // the LED flashes the camera number (LOW = LED on),
+  // one long flash = no number yet (not registered at the access point)
+  int flashes = camNumber;
+  if (flashes == 0) {
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(1000);
+    digitalWrite(LED_BUILTIN, HIGH);
+  }
+  for (int i = 0; i < flashes; i++) {
+    if (i > 0) delay(200);
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(200);
+    digitalWrite(LED_BUILTIN, HIGH);
   }
   delay(delayValue);                // wait
 }
