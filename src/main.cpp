@@ -60,6 +60,9 @@ String ipAP = "192.168.4.1";
 // 2.. = assigned by the access point at registration, 0 = not known yet
 static volatile int camNumber = 0;
 
+// camera sensor of this board (OV2640 or OV3660 on the XIAO ESP32S3 Sense), set in setCamDefault()
+static const char *sensorName = "unknown";
+
 // access point: the devices that registered (station cameras and LED boards).
 // slot i of a list is device number i + firstNumber.
 // written by the http task (registration) and loop() (timeout), guarded by devMux
@@ -154,7 +157,7 @@ uint32_t yPosition = 200;
 #define STREAM_PORT 81
 #define MAX_STREAM_CLIENTS 4       // simultaneous /stream viewers (phone, python, ...)
 #define MAX_FRAMESIZE 5            // largest allowed framesize_t index (5 = FRAMESIZE_QVGA, 320x240)
-#define DEFAULT_QUALITY 20         // jpeg quality 1 (best) - 63 (worst)
+#define DEFAULT_QUALITY 10         // jpeg quality 1 (best) - 63 (worst)
 #define DEFAULT_MAX_FPS 12         // frames per second sent to every viewer, limits the WiFi load
 #define MAX_FPS_LIMIT 30
 
@@ -202,6 +205,65 @@ static volatile uint32_t frameId = 0;      // incremented on every new frame, 0 
 static std::atomic<int> streamClients{0};
 
 
+// manual white balance: red / green / blue gain, 64 is about 1x.
+// OV2640: the white balance block stays on, DSP register 0xC7 = 0x40 switches it
+// from automatic to the gains in 0xCC (red), 0xCD (green), 0xCE (blue).
+// set_reg() address = bank << 8 | register, bank 0 = DSP
+static int wbR = 64, wbG = 64, wbB = 64;
+
+// the white balance registers as the camera set them up at start (automatic
+// white balance), written back when going from manual to automatic again.
+// set_wb_mode(0) would write 0xC7 = 0x00, which is not necessarily the start value
+static const int WB_REGS[4] = {0x0C7, 0x0CC, 0x0CD, 0x0CE};
+static int wbAutoRegs[4] = {-1, -1, -1, -1};
+
+static void printWbRegs(sensor_t *s, const char *when)
+{
+  if (s->id.PID != OV2640_PID) return;
+  Serial.printf("white balance %s: C7=%02x CC=%02x CD=%02x CE=%02x\n", when,
+                s->get_reg(s, WB_REGS[0], 0xFF), s->get_reg(s, WB_REGS[1], 0xFF),
+                s->get_reg(s, WB_REGS[2], 0xFF), s->get_reg(s, WB_REGS[3], 0xFF));
+}
+
+// call once after the camera is set up, while the white balance is still automatic
+static void saveAutoWb(sensor_t *s)
+{
+  if (s->id.PID != OV2640_PID) return;
+  for (int i = 0; i < 4; i++) wbAutoRegs[i] = s->get_reg(s, WB_REGS[i], 0xFF);
+  printWbRegs(s, "at start");
+}
+
+static void setAutoWb(sensor_t *s)
+{
+  s->set_whitebal(s, 1);
+  if (s->id.PID != OV2640_PID || wbAutoRegs[0] < 0) {
+    s->set_wb_mode(s, 0);
+    return;
+  }
+  for (int i = 0; i < 4; i++) {
+    if (wbAutoRegs[i] >= 0) s->set_reg(s, WB_REGS[i], 0xFF, wbAutoRegs[i]);
+  }
+  s->status.wb_mode = 0;
+  printWbRegs(s, "back to auto");
+}
+
+static void setManualWb(sensor_t *s, int r, int g, int b)
+{
+  wbR = constrain(r, 0, 255);
+  wbG = constrain(g, 0, 255);
+  wbB = constrain(b, 0, 255);
+  if (s->id.PID != OV2640_PID) {
+    Serial.println("manual white balance gains are only implemented for the OV2640");
+    return;
+  }
+  s->set_whitebal(s, 1);
+  s->set_reg(s, 0x0C7, 0xFF, 0x40);
+  s->set_reg(s, 0x0CC, 0xFF, wbR);
+  s->set_reg(s, 0x0CD, 0xFF, wbG);
+  s->set_reg(s, 0x0CE, 0xFF, wbB);
+  printWbRegs(s, "manual");
+}
+
 void setAllAuto(int enable)
 {
     allAuto = enable;
@@ -217,11 +279,15 @@ void setAllAuto(int enable)
     // AUTO GAIN CONTROL
     s->set_gain_ctrl(s, en);
 
-    // AUTO WHITE BALANCE
-    s->set_whitebal(s, en);
+    // WHITE BALANCE: automatic, or the manual red / green / blue gains
+    if (en) {
+      setAutoWb(s);
+    } else {
+      setManualWb(s, wbR, wbG, wbB);
+    }
 
-    // ADVANCED AUTO EXPOSURE (AEC2)
-    s->set_aec2(s, en);
+    // AEC2 ("AEC DSP") stays off: on the OV3660 it is the night mode, which
+    // lowers the frame rate in low light (see setCamDefault)
 
     // OPTIONAL: reset brightness/contrast when auto enabled
     if (en) {
@@ -377,6 +443,38 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         else if (strcmp(param, "allAuto") == 0) {
           setAllAuto(value);
         }
+        else if (strcmp(param, "agc") == 0) {          // auto gain on / off
+          value = (value != 0) ? 1 : 0;
+          if (!value) s->set_agc_gain(s, s->status.agc_gain);   // keep the current gain
+          s->set_gain_ctrl(s, value);
+        }
+        else if (strcmp(param, "agc_gain") == 0) {     // manual gain 0..30, switches auto gain off
+          if (value < 0) value = 0;
+          if (value > 30) value = 30;
+          s->set_gain_ctrl(s, 0);
+          s->set_agc_gain(s, value);
+        }
+        else if (strcmp(param, "awb") == 0) {          // auto white balance on / off (off = manual gains)
+          if (value) {
+            setAutoWb(s);
+          } else {
+            setManualWb(s, wbR, wbG, wbB);
+          }
+        }
+        else if (strcmp(param, "wb_mode") == 0) {      // 0 auto, 1 sunny, 2 cloudy, 3 office, 4 home
+          if (value < 0) value = 0;
+          if (value > 4) value = 4;
+          if (value == 0) {
+            setAutoWb(s);
+          } else {
+            s->set_whitebal(s, 1);                     // the presets need the white balance block on
+            s->set_wb_mode(s, value);
+          }
+        }
+        else if (strcmp(param, "wb_rgb") == 0) {       // manual white balance "red,green,blue" 0..255
+          int r, g, b;
+          if (sscanf(value_str, "%d,%d,%d", &r, &g, &b) == 3) setManualWb(s, r, g, b);
+        }
         else if (strcmp(param, "fps") == 0) {
           if (value < 1) value = 1;
           if (value > MAX_FPS_LIMIT) value = MAX_FPS_LIMIT;
@@ -406,12 +504,14 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         "{\"quality\":%d,\"exposure\":%d,\"auto_exposure\":%d,"
         "\"gain\":%d,\"brightness\":%d,\"contrast\":%d,"
         "\"saturation\":%d,\"framesize\":%d,\"maxFramesize\":%d,"
-        "\"allAuto\":%d,\"number\":%d,\"streamClients\":%d,"
-        "\"fps\":%d,\"maxFpsLimit\":%d}",
+        "\"allAuto\":%d,\"agc\":%d,\"agc_gain\":%d,\"awb\":%d,\"wb_mode\":%d,"
+        "\"wb_r\":%d,\"wb_g\":%d,\"wb_b\":%d,\"number\":%d,\"streamClients\":%d,"
+        "\"fps\":%d,\"maxFpsLimit\":%d,\"sensor\":\"%s\"}",
         quality, exposure, auto_exp,
         gain, brightness, contrast, saturation, framesize, MAX_FRAMESIZE,
-        allAuto, camNumber, streamClients.load(),
-        maxFps, MAX_FPS_LIMIT
+        allAuto, s->status.agc, s->status.agc_gain, s->status.awb, s->status.wb_mode,
+        wbR, wbG, wbB, camNumber, streamClients.load(),
+        maxFps, MAX_FPS_LIMIT, sensorName
     );
 
     httpd_resp_set_type(req, "application/json");
@@ -867,6 +967,17 @@ void setCamDefault()
   s->set_saturation(s,0);
   s->set_quality(s, DEFAULT_QUALITY);
   s->set_framesize(s, (framesize_t)MAX_FRAMESIZE);
+  // AEC2 ("AEC DSP") off: on the OV3660 it is the night mode, which lowers the
+  // frame rate in low light; the normal auto exposure works without it
+  s->set_aec2(s, 0);
+
+  // which sensor this camera has (OV2640 or OV3660 on the XIAO ESP32S3 Sense)
+  camera_sensor_info_t *info = esp_camera_sensor_get_info(&s->id);
+  if (info) sensorName = info->name;
+  Serial.printf("camera sensor: %s (PID 0x%04x)\n", sensorName, s->id.PID);
+
+  // remember the automatic white balance setup, to restore it after manual mode
+  saveAutoWb(s);
 }
 
 
@@ -957,7 +1068,7 @@ void loop() {
     Serial.print("WIFI strength: ");
     Serial.println (WiFi.RSSI());
   }
-  Serial.printf("camera number: %d\n", camNumber);
+  Serial.printf("camera number: %d, sensor: %s\n", camNumber, sensorName);
 
   // the LED flashes the camera number (LOW = LED on),
   // one long flash = no number yet (not registered at the access point)

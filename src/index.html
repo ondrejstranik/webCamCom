@@ -38,6 +38,64 @@
   .cam-badge.ok {
     background: #0a0;
   }
+  /* pixel mean chart under the camera images */
+  #sumBox, #profileBox {
+    width: 100%;
+    max-width: 400px;
+    font-size: 14px;
+    color: #333;
+  }
+  #sumChart, #profileChart {
+    display: block;
+    width: 100%;
+    height: 160px;
+    background: #fff;
+    touch-action: none;
+  }
+  .sum-key {
+    margin-right: 12px;
+    white-space: nowrap;
+  }
+  .sum-key i {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-right: 4px;
+    border-radius: 2px;
+  }
+  #sumWhen, .sum-where {
+    color: #777;
+  }
+  /* line of the intensity profile on the image, through the green cross */
+  /* a band as wide as the line thickness: dashed edges, lightly filled */
+  #profileLine {
+    display: none;
+    position: absolute;
+    box-sizing: border-box;
+    border-top: 1px dashed #00e5ff;
+    border-bottom: 1px dashed #00e5ff;
+    background: rgba(0, 229, 255, 0.2);
+    pointer-events: none;
+  }
+  #profileLine.vertical {
+    border-top: none;
+    border-bottom: none;
+    border-left: 1px dashed #00e5ff;
+    border-right: 1px dashed #00e5ff;
+  }
+  #profileLine.thin {
+    border: none;
+    background: #00e5ff;
+  }
+  /* measuring circle on the image, centered on the green cross */
+  #sumCircle {
+    display: none;
+    position: absolute;
+    box-sizing: border-box;
+    border: 2px dashed #ff00ff;
+    border-radius: 50%;
+    pointer-events: none;   /* clicks go to the cross below */
+  }
   /* LED controls: centered like the camera images, at the top of the page */
   #leds {
     display: flex;
@@ -87,18 +145,65 @@
     <div id="leds"></div>
 
     <canvas id='myCanvas' width='50px' height='50px'></canvas>
+    <!-- area of the pixel mean, centered on the cross, only shown while Mean is on -->
+    <div id="sumCircle"></div>
+    <!-- line of the intensity profile through the cross, only shown while Profile is on -->
+    <div id="profileLine"></div>
     <div class="vertical-container">
         <!-- one tile (camera number + stream) per shown camera, more are added by getImg() -->
         <div class="cam-tile"><span class="cam-badge"></span><img id="cameraStreamID" alt="" /></div>
         <div class="cam-tile"><span class="cam-badge"></span><img id="camera2StreamID" alt="" /></div>
         <!-- one toggle button per camera, filled by renderCamButtons() -->
         <div id='camButtons'></div>
+        <!-- mean of the pixels inside the pink circle, per channel, last 100 frames -->
+        <div id="sumBox" style="display:none;">
+          <div id="sumInfo">...</div>
+          <canvas id="sumChart" aria-label="Mean of red, green and blue under the green cross, last 100 frames"></canvas>
+          <div id="sumLegend">
+            <span class="sum-key"><i style="background:#d62828"></i>R <b id="sumR">-</b></span>
+            <span class="sum-key"><i style="background:#2a9d3a"></i>G <b id="sumG">-</b></span>
+            <span class="sum-key"><i style="background:#2b6cd4"></i>B <b id="sumB">-</b></span>
+            <span id="sumWhen"></span>
+          </div>
+          Circle diameter: <span id="sumDiaVal">48</span> px<br>
+          <input type="range" id="sumDiaSlider" min="4" max="200" value="48" oninput="setSumDiameter(this.value)" style="width:100%;">
+        </div>
+        <!-- intensity profile along the line through the cross, per channel -->
+        <div id="profileBox" style="display:none;">
+          <div id="profileInfo">...</div>
+          <canvas id="profileChart" aria-label="Red, green and blue intensity along the line through the green cross"></canvas>
+          <div>
+            <span class="sum-key"><i style="background:#d62828"></i>R <b id="profR">-</b></span>
+            <span class="sum-key"><i style="background:#2a9d3a"></i>G <b id="profG">-</b></span>
+            <span class="sum-key"><i style="background:#2b6cd4"></i>B <b id="profB">-</b></span>
+            <span id="profWhere" class="sum-where"></span>
+          </div>
+          <button id="profH" class="toggle on" onclick="setProfileDir('h')">Horizontal</button>
+          <button id="profV" class="toggle" onclick="setProfileDir('v')">Vertical</button><br>
+          Line thickness: <span id="profThickVal">1</span> px (average across the line)<br>
+          <input type="range" id="profThickSlider" min="1" max="50" value="1" oninput="setProfileThickness(this.value)" style="width:100%;">
+        </div>
     </div>
     <div style="margin:20px;">
-        <button id="autoBtn" onclick="toggleAuto()" style="padding:10px;">AUTO: ...</button>
-        Exposure: <span id="expVal">...</span><br>
-        <input type="range" id="expSlider" min="0" max="1200" value="0" oninput="setExposure(this.value)">
+        <!-- AUTO on: exposure, gain and white balance automatic; off: set by hand below -->
+        <button id="autoBtn" class="toggle" onclick="toggleAuto()">AUTO: ...</button>
+        <div id="manual" style="display:none;">
+          Exposure: <span id="expVal">...</span><br>
+          <input type="range" id="expSlider" min="0" max="1200" value="0" oninput="setExposure(this.value)"><br>
+          Gain: <span id="gainVal">...</span><br>
+          <input type="range" id="gainSlider" min="0" max="30" value="0" oninput="setGain(this.value)"><br>
+          White balance (64 = 1x):
+          <button id="wbLockBtn" class="toggle on" onclick="toggleWbLock()">1:1:1</button><br>
+          Red: <span id="wbRVal">64</span><br>
+          <input type="range" id="wbRSlider" min="0" max="255" value="64" oninput="setWb('r', this.value)"><br>
+          Green: <span id="wbGVal">64</span><br>
+          <input type="range" id="wbGSlider" min="0" max="255" value="64" oninput="setWb('g', this.value)"><br>
+          Blue: <span id="wbBVal">64</span><br>
+          <input type="range" id="wbBSlider" min="0" max="255" value="64" oninput="setWb('b', this.value)">
+        </div>
     </div>
+    <button id="sumBtn" class="toggle" onclick="toggleSum()">Mean</button>
+    <button id="profileBtn" class="toggle" onclick="toggleProfile()">Profile</button>
     <button id="advBtn" class="toggle" onclick="toggleAdvanced()">Advanced</button>
     <div id="advanced" style="display:none;">
       <p>Stream: <span id='fpsval'>...</span></p>
@@ -142,42 +247,28 @@
     const targetFps = {};
     const FPS_OK_RATIO = 0.8;
 
+    // camera sensor of each camera (ip -> 'OV2640' / 'OV3660'), shown in the stream info
+    const sensors = {};
+
     function fetchTargetFps(ip) {
       fetch(`http://${ip}/camera`, {mode: "cors"})
         .then(r => r.json())
-        .then(d => { if (d.fps !== undefined) targetFps[ip] = d.fps; })
+        .then(d => {
+          if (d.fps !== undefined) targetFps[ip] = d.fps;
+          if (d.sensor) sensors[ip] = d.sensor;
+        })
         .catch(() => {});
     }
     //var c='http://esp32.local'
     //var c=document.location.origin
     let allAuto = 1;
     let exposure = 0;
-    let current = 20;
+    let current = 10;
+    // manual white balance gains (64 = 1x); wbLock: the three channels keep the same value
+    let wb = {r: 64, g: 64, b: 64};
+    let wbLock = true;
     let maxFrame = 5;
     const EMPTY_IMG = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-
-
-    function isMobile() {
-        return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    }
-
-    function isLandscape() {
-        if (!isMobile()) return false; // desktop never swaps
-        if (window.screen && window.screen.orientation && window.screen.orientation.type) {
-            return window.screen.orientation.type.startsWith("landscape");
-        }
-        // Fallback for older browsers
-        return window.innerWidth > window.innerHeight;
-    }
-
-    function transformCoordsForPhone(x, y) {
-        if (isLandscape()) {
-            // Swap x and y if in landscape mode
-            return {x: y, y: x};
-        } else {
-            return {x: x, y: y};
-        }
-    }
 
 
     function Draw(){
@@ -203,41 +294,42 @@
       ctx.stroke();
     }
 
-    function move(e){
-      var newX = e.clientX - 10;
-      var newY = e.clientY - 10;
+    // drag the cross: press on it, move, release (mouse and touch).
+    // page coordinates (pageX/Y), so the cross stays under the pointer when the
+    // page is scrolled; grab keeps the point of the cross where it was pressed
+    let grab = null;
 
-    // Swap if mobile and landscape
-    // TODO: does not work
-    if (isMobile() && isLandscape()) {
-      image.style.left = newY + "px";
-      image.style.top = newX + "px";
-    } else
-    {
-      image.style.left = newX + "px";
-      image.style.top = newY + "px";
-
-    }
-      //let pos = transformCoordsForPhone(newX, newY);
-
-      //image.style.left = pos.x + "px";
-      //image.style.top = pos.y + "px";
+    function startDrag(e) {
+      grab = {
+        x: e.pageX - (parseFloat(cnvs.style.left) || 0),
+        y: e.pageY - (parseFloat(cnvs.style.top) || 0),
+      };
+      moving = true;
+      cnvs.setPointerCapture(e.pointerId);
+      e.preventDefault();
     }
 
-    function initialClick(e) {
-      if(moving){
-        document.removeEventListener("mousemove", move);
-        moving = !moving;
-        return;
-      }
-      moving = !moving;
-      image = this;
-      document.addEventListener("mousemove", move, false);
+    function drag(e) {
+      if (!moving) return;
+      cnvs.style.left = (e.pageX - grab.x) + "px";
+      cnvs.style.top = (e.pageY - grab.y) + "px";
+      placeOverlays();    // measuring circle and profile line follow the cross
     }
+
+    function endDrag(e) {
+      moving = false;
+      if (cnvs.hasPointerCapture(e.pointerId)) cnvs.releasePointerCapture(e.pointerId);
+    }
+
     // draw the cross
     Draw();
-    // activate clicking
-    cnvs.addEventListener("mousedown", initialClick, false);
+    // activate dragging
+    cnvs.style.touchAction = 'none';    // no page scrolling while dragging on a phone
+    cnvs.style.cursor = 'move';
+    cnvs.addEventListener("pointerdown", startDrag);
+    cnvs.addEventListener("pointermove", drag);
+    cnvs.addEventListener("pointerup", endDrag);
+    cnvs.addEventListener("pointercancel", endDrag);
 
 
     /* ---------- video streams ---------- */
@@ -341,9 +433,11 @@
       }
       el._lastFrame = now;
       const old = el._url;
-      el._url = URL.createObjectURL(new Blob([jpg], {type: 'image/jpeg'}));
+      const blob = new Blob([jpg], {type: 'image/jpeg'});
+      el._url = URL.createObjectURL(blob);
       el.src = el._url;
       if (old) URL.revokeObjectURL(old);
+      if (sumOn || profileOn) analyzeFrame(el, blob);
     }
 
     // every second: frame rate, data rate and the longest pause between two
@@ -357,7 +451,7 @@
           const dt = (now - s.t) / 1000;
           const fps = s.frames / dt;
           const gap = el._ctrl ? Math.max(s.maxGap, now - el._lastFrame) : s.maxGap;
-          lines.push(`Cam ${el._n} (${el._ip}): ${fps.toFixed(1)} fps, ` +
+          lines.push(`Cam ${el._n} (${sensors[el._ip] || '?'}, ${el._ip}): ${fps.toFixed(1)} fps, ` +
                      `${(s.bytes / 1024 / dt).toFixed(0)} kB/s, ` +
                      `max gap ${gap} ms, ${el._reconnects || 0} reconnects`);
 
@@ -385,6 +479,372 @@
         else startStream(el);
       }
     });
+
+
+    /* ---------- image analysis under the green cross: mean and profile ---------- */
+
+    // Mean: for every frame of the camera image the cross is on, mean of the red,
+    // green and blue values of all pixels inside the pink measuring circle, the
+    // last SUM_LEN shown.
+    // Profile: red, green and blue value of every pixel along the horizontal or
+    // vertical line through the cross (cyan line on the image).
+    const SUM_LEN = 100;
+    const RGB_COLORS = {r: '#d62828', g: '#2a9d3a', b: '#2b6cd4'};
+    const CHART = {left: 46, right: 8, top: 8, bottom: 18};   // plot margins in px
+    let sumOn = false;
+    let sumHist = {r: [], g: [], b: []};
+    let sumCam = 0;           // camera number the history belongs to
+    let sumHover = null;      // index of the hovered value, null = latest
+    let sumDiameter = 48;     // diameter of the measuring circle in screen pixels
+    let profileOn = false;
+    let profileDir = 'h';     // 'h' = horizontal line, 'v' = vertical line
+    let profile = {r: [], g: [], b: []};
+    let profileCross = 0;     // index of the cross position along the line
+    let profileHover = null;  // index of the hovered pixel, null = cross position
+    let profileThickness = 1; // image pixels across the line that are averaged
+    const work = document.createElement('canvas');
+    const workCtx = work.getContext('2d', {willReadFrequently: true});
+
+    function toggleSum() {
+      sumOn = !sumOn;
+      document.getElementById('sumBtn').classList.toggle('on', sumOn);
+      document.getElementById('sumBox').style.display = sumOn ? '' : 'none';
+      sumHist = {r: [], g: [], b: []};
+      sumCam = 0;
+      placeOverlays();
+      showAnalysisInfo();
+      drawSum();
+    }
+
+    function toggleProfile() {
+      profileOn = !profileOn;
+      document.getElementById('profileBtn').classList.toggle('on', profileOn);
+      document.getElementById('profileBox').style.display = profileOn ? '' : 'none';
+      profile = {r: [], g: [], b: []};
+      placeOverlays();
+      showAnalysisInfo();
+      drawProfile();
+    }
+
+    function setProfileDir(dir) {
+      profileDir = dir;
+      document.getElementById('profH').classList.toggle('on', dir == 'h');
+      document.getElementById('profV').classList.toggle('on', dir == 'v');
+      profile = {r: [], g: [], b: []};
+      profileHover = null;
+      placeOverlays();
+      drawProfile();
+    }
+
+    function setProfileThickness(val) {
+      profileThickness = parseInt(val);
+      document.getElementById('profThickVal').innerText = profileThickness;
+      placeOverlays();
+    }
+
+    // a different area: start a new history
+    function setSumDiameter(val) {
+      sumDiameter = parseInt(val);
+      document.getElementById('sumDiaVal').innerText = sumDiameter;
+      sumHist = {r: [], g: [], b: []};
+      placeOverlays();
+      drawSum();
+    }
+
+    // the shown stream image the center of the cross is on, or null
+    function crossTarget() {
+      const c = cnvs.getBoundingClientRect();
+      const cx = c.left + c.width / 2;
+      const cy = c.top + c.height / 2;
+      for (const el of imgs) {
+        if (!el._ctrl || el._tile.style.display == 'none') continue;
+        const r = el.getBoundingClientRect();
+        if (cx >= r.left && cx < r.right && cy >= r.top && cy < r.bottom) return el;
+      }
+      return null;
+    }
+
+    // pink measuring circle and cyan profile line on the image, both follow the
+    // cross (all three are positioned in page coordinates)
+    function placeOverlays() {
+      const cx = (parseFloat(cnvs.style.left) || 0) + cnvs.offsetWidth / 2;
+      const cy = (parseFloat(cnvs.style.top) || 0) + cnvs.offsetHeight / 2;
+
+      const circle = document.getElementById('sumCircle');
+      circle.style.display = sumOn ? 'block' : 'none';   // the stylesheet hides it by default
+      if (sumOn) {
+        circle.style.width = circle.style.height = sumDiameter + 'px';
+        circle.style.left = (cx - sumDiameter / 2) + 'px';
+        circle.style.top = (cy - sumDiameter / 2) + 'px';
+      }
+
+      // the line spans the image the cross is on
+      const line = document.getElementById('profileLine');
+      const el = profileOn ? crossTarget() : null;
+      line.style.display = el ? 'block' : 'none';
+      if (el) {
+        const r = el.getBoundingClientRect();
+        const horizontal = profileDir == 'h';
+        // thickness in image pixels -> screen pixels (the image may be shown scaled)
+        const scale = el.naturalWidth ? r.width / el.naturalWidth : 1;
+        const band = Math.max(profileThickness * scale, 2);
+        line.classList.toggle('vertical', !horizontal);
+        line.classList.toggle('thin', band < 6);
+        line.style.left = (horizontal ? r.left + window.scrollX : cx - band / 2) + 'px';
+        line.style.top = (horizontal ? cy - band / 2 : r.top + window.scrollY) + 'px';
+        line.style.width = (horizontal ? r.width : band) + 'px';
+        line.style.height = (horizontal ? band : r.height) + 'px';
+      }
+    }
+
+    function showAnalysisInfo() {
+      const el = crossTarget();
+      const none = 'Move the green cross onto a camera image';
+      document.getElementById('sumInfo').innerText = el
+        ? `Camera ${el._n}: mean inside the pink circle, last ${SUM_LEN} frames` : none;
+      document.getElementById('profileInfo').innerText = el
+        ? `Camera ${el._n}: ${profileDir == 'h' ? 'horizontal' : 'vertical'} profile through the cross` : none;
+    }
+
+    // called for every received frame while Mean or Profile is on
+    function analyzeFrame(el, blob) {
+      if (el._analyzing || el !== crossTarget()) return;
+      el._analyzing = true;
+      createImageBitmap(blob).then(bmp => {
+        // cross center in image pixels (the image may be shown scaled)
+        const r = el.getBoundingClientRect();
+        const c = cnvs.getBoundingClientRect();
+        const scale = bmp.width / r.width;
+        const cx = (c.left + c.width / 2 - r.left) * scale;
+        const cy = (c.top + c.height / 2 - r.top) * scale;
+        if (sumOn) sumFrame(el, bmp, cx, cy, scale);
+        if (profileOn) profileFrame(bmp, cx, cy);
+        bmp.close();
+      }).catch(() => {}).finally(() => { el._analyzing = false; });
+    }
+
+    function sumFrame(el, bmp, cx, cy, scale) {
+      const radius = sumDiameter / 2 * scale;
+      const x0 = Math.max(0, Math.floor(cx - radius));
+      const y0 = Math.max(0, Math.floor(cy - radius));
+      const x1 = Math.min(bmp.width, Math.ceil(cx + radius));
+      const y1 = Math.min(bmp.height, Math.ceil(cy + radius));
+      const w = x1 - x0, h = y1 - y0;
+      if (w <= 0 || h <= 0) return;
+
+      work.width = w;
+      work.height = h;
+      workCtx.drawImage(bmp, x0, y0, w, h, 0, 0, w, h);
+      const px = workCtx.getImageData(0, 0, w, h).data;
+      let R = 0, G = 0, B = 0, count = 0;
+      const r2 = radius * radius;
+      for (let y = 0; y < h; y++) {
+        const dy = y0 + y + 0.5 - cy;
+        for (let x = 0; x < w; x++) {
+          const dx = x0 + x + 0.5 - cx;
+          if (dx * dx + dy * dy > r2) continue;
+          const i = (y * w + x) * 4;
+          R += px[i];
+          G += px[i + 1];
+          B += px[i + 2];
+          count++;
+        }
+      }
+      if (!count) return;
+      // mean value per pixel, 0..255
+      R /= count;
+      G /= count;
+      B /= count;
+
+      // another camera under the cross: start a new history
+      if (el._n != sumCam) {
+        sumCam = el._n;
+        sumHist = {r: [], g: [], b: []};
+        showAnalysisInfo();
+      }
+      for (const [ch, v] of [['r', R], ['g', G], ['b', B]]) {
+        sumHist[ch].push(v);
+        if (sumHist[ch].length > SUM_LEN) sumHist[ch].shift();
+      }
+      drawSum();
+    }
+
+    // line through the cross over the full image; with a thickness above 1 the
+    // pixels across the line (centered on the cross) are averaged
+    function profileFrame(bmp, cx, cy) {
+      const horizontal = profileDir == 'h';
+      const n = horizontal ? bmp.width : bmp.height;
+      const across = horizontal ? bmp.height : bmp.width;
+      const center = Math.floor(horizontal ? cy : cx);
+      const p0 = Math.min(Math.max(center - Math.floor((profileThickness - 1) / 2), 0), across - 1);
+      const t = Math.max(Math.min(profileThickness, across - p0), 1);
+      work.width = horizontal ? n : t;
+      work.height = horizontal ? t : n;
+      if (horizontal) workCtx.drawImage(bmp, 0, p0, n, t, 0, 0, n, t);
+      else workCtx.drawImage(bmp, p0, 0, t, n, 0, 0, t, n);
+      const px = workCtx.getImageData(0, 0, work.width, work.height).data;
+      profile = {r: new Array(n).fill(0), g: new Array(n).fill(0), b: new Array(n).fill(0)};
+      for (let i = 0; i < n; i++) {
+        for (let k = 0; k < t; k++) {
+          const j = (horizontal ? k * n + i : i * t + k) * 4;
+          profile.r[i] += px[j];
+          profile.g[i] += px[j + 1];
+          profile.b[i] += px[j + 2];
+        }
+        profile.r[i] /= t;
+        profile.g[i] /= t;
+        profile.b[i] /= t;
+      }
+      profileCross = Math.min(Math.max(Math.floor(horizontal ? cx : cy), 0), n - 1);
+      drawProfile();
+    }
+
+    function fmtMean(v) {
+      return v.toFixed(1);
+    }
+
+    // line chart of the three channels on one axis.
+    // o.slots: positions on the x axis, o.offset: slot of the first value,
+    // o.lo / o.hi: fixed value range (auto when undefined), o.hover / o.mark: highlighted index
+    function drawRgbChart(cv, data, o) {
+      const dpr = window.devicePixelRatio || 1;
+      const W = cv.clientWidth, H = cv.clientHeight;
+      if (!W || !H) return;
+      if (cv.width != Math.round(W * dpr)) {
+        cv.width = Math.round(W * dpr);
+        cv.height = Math.round(H * dpr);
+      }
+      const g = cv.getContext('2d');
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, W, H);
+      const n = data.r.length;
+      if (!n) return;
+
+      let lo = o.lo, hi = o.hi;
+      if (lo === undefined) {
+        const all = [...data.r, ...data.g, ...data.b];
+        lo = Math.min(...all);
+        hi = Math.max(...all);
+        if (hi == lo) { hi += 1; lo -= 1; }
+        const pad = (hi - lo) * 0.1;
+        lo = Math.max(0, lo - pad);
+        hi += pad;
+      }
+      const plotW = W - CHART.left - CHART.right, plotH = H - CHART.top - CHART.bottom;
+      const X = i => CHART.left + (o.offset + i) * plotW / Math.max(o.slots - 1, 1);
+      const Y = v => CHART.top + (hi - v) / (hi - lo) * plotH;
+      const vline = (i, color, dash) => {
+        g.strokeStyle = color;
+        g.setLineDash(dash);
+        g.beginPath();
+        g.moveTo(Math.round(X(i)) + 0.5, CHART.top);
+        g.lineTo(Math.round(X(i)) + 0.5, CHART.top + plotH);
+        g.stroke();
+        g.setLineDash([]);
+      };
+
+      // recessive grid with three value labels
+      g.lineWidth = 1;
+      g.strokeStyle = '#e6e6e6';
+      g.fillStyle = '#666';
+      g.font = '11px sans-serif';
+      g.textAlign = 'right';
+      g.textBaseline = 'middle';
+      for (let k = 0; k <= 2; k++) {
+        const v = lo + (hi - lo) * k / 2;
+        const y = Math.round(Y(v)) + 0.5;
+        g.beginPath();
+        g.moveTo(CHART.left, y);
+        g.lineTo(W - CHART.right, y);
+        g.stroke();
+        g.fillText(o.fmt(v), CHART.left - 4, y);
+      }
+      g.textAlign = 'left';
+      g.textBaseline = 'alphabetic';
+      g.fillText(o.xLabel, CHART.left, H - 4);
+
+      if (o.mark != null) vline(o.mark, '#bbb', [3, 3]);
+      if (o.hover != null && o.hover < n) vline(o.hover, '#999', []);
+
+      // the three channels, 2px lines
+      g.lineWidth = 2;
+      g.lineJoin = 'round';
+      for (const ch of ['r', 'g', 'b']) {
+        g.strokeStyle = RGB_COLORS[ch];
+        g.beginPath();
+        data[ch].forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v)));
+        g.stroke();
+      }
+    }
+
+    // index of the value under the pointer, null = outside
+    function chartIndex(cv, e, slots, offset, n) {
+      const rect = cv.getBoundingClientRect();
+      const plotW = rect.width - CHART.left - CHART.right;
+      const slot = Math.round((e.clientX - rect.left - CHART.left) / plotW * Math.max(slots - 1, 1));
+      const i = slot - offset;
+      return (i >= 0 && i < n) ? i : null;
+    }
+
+    function showLegend(prefix, data, i, fmt) {
+      for (const ch of ['r', 'g', 'b']) {
+        document.getElementById(prefix + ch.toUpperCase()).innerText =
+          data.r.length ? fmt(data[ch][i]) : '-';
+      }
+    }
+
+    // the newest value is at the right
+    function drawSum() {
+      const n = sumHist.r.length;
+      const shown = (sumHover != null && sumHover < n) ? sumHover : n - 1;
+      showLegend('sum', sumHist, shown, fmtMean);
+      document.getElementById('sumWhen').innerText =
+        !n ? '' : (shown == n - 1 ? 'latest' : `${n - 1 - shown} frames ago`);
+      drawRgbChart(document.getElementById('sumChart'), sumHist, {
+        slots: SUM_LEN, offset: SUM_LEN - n, fmt: fmtMean,
+        xLabel: `last ${SUM_LEN} frames`, hover: sumHover,
+      });
+    }
+
+    // fixed 0..255 axis, the dashed line marks the cross position
+    function drawProfile() {
+      const n = profile.r.length;
+      const shown = (profileHover != null && profileHover < n) ? profileHover : profileCross;
+      showLegend('prof', profile, shown, v => Number.isInteger(v) ? String(v) : v.toFixed(1));
+      const axis = profileDir == 'h' ? 'x' : 'y';
+      document.getElementById('profWhere').innerText =
+        !n ? '' : `${axis} = ${shown} px${shown == profileCross ? ' (cross)' : ''}`;
+      drawRgbChart(document.getElementById('profileChart'), profile, {
+        slots: n, offset: 0, lo: 0, hi: 255, fmt: v => v.toFixed(0),
+        xLabel: `pixel ${axis} (0 - ${n - 1})`, hover: profileHover, mark: profileCross,
+      });
+    }
+
+    // hover / touch on a chart: show the values at that position in the legend
+    const sumChart = document.getElementById('sumChart');
+    sumChart.addEventListener('pointermove', e => {
+      const n = sumHist.r.length;
+      sumHover = chartIndex(sumChart, e, SUM_LEN, SUM_LEN - n, n);
+      drawSum();
+    });
+    sumChart.addEventListener('pointerleave', () => { sumHover = null; drawSum(); });
+
+    const profileChart = document.getElementById('profileChart');
+    profileChart.addEventListener('pointermove', e => {
+      const n = profile.r.length;
+      profileHover = chartIndex(profileChart, e, n, 0, n);
+      drawProfile();
+    });
+    profileChart.addEventListener('pointerleave', () => { profileHover = null; drawProfile(); });
+
+    // the cross can be moved and the images can change size at any time
+    setInterval(() => {
+      if (sumOn || profileOn) {
+        showAnalysisInfo();
+        placeOverlays();
+      }
+    }, 1000);
+    window.addEventListener('resize', placeOverlays);
 
 
     /* ---------- camera parameters ---------- */
@@ -441,7 +901,15 @@
       if (d.maxFramesize !== undefined) maxFrame = d.maxFramesize;
 
       document.getElementById('qval').innerText = current;
-      document.getElementById('autoBtn').innerText = "AUTO: " + (allAuto ? "ON" : "OFF");
+      if (d.agc_gain !== undefined) {
+        document.getElementById('gainSlider').value = d.agc_gain;
+        document.getElementById('gainVal').innerText = d.agc_gain;
+      }
+      if (d.wb_r !== undefined) {
+        wb = {r: d.wb_r, g: d.wb_g, b: d.wb_b};
+        if (wb.r != wb.g || wb.g != wb.b) wbLock = false;   // the camera has different channels
+      }
+      showAuto();
 
       document.getElementById('expSlider').value = exposure;
       document.getElementById('expVal').innerText = exposure;
@@ -539,11 +1007,56 @@
       sendSet('fps', val);
     }
 
-    // Toggle auto / manual
+    // AUTO on: exposure, gain and white balance automatic.
+    // AUTO off: all three off, set by hand with the controls shown below the button
     function toggleAuto() {
       allAuto = allAuto ? 0 : 1;
-      document.getElementById('autoBtn').innerText = "AUTO: " + (allAuto ? "ON" : "OFF");
+      showAuto();
       sendSet('allAuto', allAuto);
+    }
+
+    function showAuto() {
+      const b = document.getElementById('autoBtn');
+      b.innerText = "AUTO: " + (allAuto ? "ON" : "OFF");
+      b.classList.toggle('on', !!allAuto);
+      document.getElementById('manual').style.display = allAuto ? 'none' : '';
+      showWb();
+    }
+
+    // manual white balance: sliders and 1:1:1 toggle
+    function showWb() {
+      for (const ch of ['r', 'g', 'b']) {
+        const C = ch.toUpperCase();
+        document.getElementById(`wb${C}Slider`).value = wb[ch];
+        document.getElementById(`wb${C}Val`).innerText = wb[ch];
+      }
+      document.getElementById('wbLockBtn').classList.toggle('on', wbLock);
+    }
+
+    function sendWb() {
+      showWb();
+      sendSet('wb_rgb', `${wb.r},${wb.g},${wb.b}`);
+    }
+
+    // one channel changed; with 1:1:1 all three follow
+    function setWb(ch, val) {
+      val = parseInt(val);
+      if (wbLock) wb = {r: val, g: val, b: val};
+      else wb[ch] = val;
+      sendWb();
+    }
+
+    // 1:1:1 on: all channels get the value of green
+    function toggleWbLock() {
+      wbLock = !wbLock;
+      if (wbLock) wb = {r: wb.g, g: wb.g, b: wb.g};
+      sendWb();
+    }
+
+    // manual gain 0..30
+    function setGain(val) {
+      document.getElementById('gainVal').innerText = val;
+      sendSet('agc_gain', val);
     }
 
     // Set manual exposure
