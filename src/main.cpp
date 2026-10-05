@@ -28,6 +28,7 @@
 #include "lwip/sockets.h"
 
 #include "index_html_gz.h"
+#include "fake_internet.h"
 
 
 //Replace with your network credentials
@@ -37,8 +38,9 @@ String host = "esp32";
 int access_point = 0;
 String ipAP = "192.168.4.1";
 
-// all cameras run the same firmware: the first one that finds no "esp32" network
-// creates it (access point, 192.168.4.1), a further camera joins it as station
+// all cameras run the same firmware: the first device that finds no "esp32" network
+// creates it (access point, 192.168.4.1), every further device joins it as station.
+// the LED board (ledCom firmware) follows the same rules, so it can be the access point too
 #define WIFI_CHANNEL 6                  // fixed channel, so joining and scanning is fast
 #define STA_CONNECT_TIMEOUT_MS 10000    // how long to look for an existing access point at boot
 #define STA_LOST_RESTART_MS 30000       // station: restart (and re-decide the role) after this long without the access point
@@ -112,8 +114,9 @@ static void expireDevices(DeviceList &list)
   }
 }
 
-// JSON list of the registered devices: [{"n":2,"ip":"192.168.4.2"},...]
-static void devicesJson(DeviceList &list, char *out, size_t size)
+// JSON list of the registered devices: [{"n":2,"ip":"192.168.4.2"},...].
+// selfIp: this device is part of the list too, with number firstNumber - 1
+static void devicesJson(DeviceList &list, char *out, size_t size, const char *selfIp = NULL)
 {
   Slot copy[MAX_SLOTS];
   portENTER_CRITICAL(&devMux);
@@ -121,6 +124,7 @@ static void devicesJson(DeviceList &list, char *out, size_t size)
   portEXIT_CRITICAL(&devMux);
 
   size_t used = snprintf(out, size, "[");
+  if (selfIp) used += snprintf(out + used, size - used, "{\"n\":%d,\"ip\":\"%s\"}", list.firstNumber - 1, selfIp);
   for (int i = 0; i < list.count && used < size; i++) {
     if (copy[i].ip[0] == 0) continue;
     used += snprintf(out + used, size - used, "%s{\"n\":%d,\"ip\":\"%s\"}",
@@ -269,6 +273,24 @@ static esp_err_t register_handler(httpd_req_t *req)
   return httpd_resp_sendstr(req, resp);
 }
 
+// Handler for "/devices" (access point): all cameras and LED boards of the network,
+// {"cams":[{"n":1,"ip":"192.168.4.1"},...],"leds":[{"n":1,"ip":"192.168.4.3"},...]}.
+// the web page reads it from 192.168.4.1, which is a camera or an LED board
+static esp_err_t devices_handler(httpd_req_t *req)
+{
+  char camList[200];
+  char ledList[100];
+  devicesJson(cams, camList, sizeof(camList), access_point == 1 ? ipAP.c_str() : NULL);
+  devicesJson(leds, ledList, sizeof(ledList));
+
+  char json[320];
+  snprintf(json, sizeof(json), "{\"cams\":%s,\"leds\":%s}", camList, ledList);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return httpd_resp_sendstr(req, json);
+}
+
 // Handler for Camera Control "/camera /camera?set=quality&value=30"
 static esp_err_t camera_control_handler(httpd_req_t *req)
 {
@@ -379,21 +401,16 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
     int saturation   = s->status.saturation;
     int framesize    = s->status.framesize;
 
-    char camList[160];
-    devicesJson(cams, camList, sizeof(camList));
-    char ledList[100];
-    devicesJson(leds, ledList, sizeof(ledList));
-
-    char json[580];
+    char json[400];
     snprintf(json, sizeof(json),
         "{\"quality\":%d,\"exposure\":%d,\"auto_exposure\":%d,"
         "\"gain\":%d,\"brightness\":%d,\"contrast\":%d,"
         "\"saturation\":%d,\"framesize\":%d,\"maxFramesize\":%d,"
-        "\"allAuto\":%d,\"number\":%d,\"cams\":%s,\"leds\":%s,\"streamClients\":%d,"
+        "\"allAuto\":%d,\"number\":%d,\"streamClients\":%d,"
         "\"fps\":%d,\"maxFpsLimit\":%d}",
         quality, exposure, auto_exp,
         gain, brightness, contrast, saturation, framesize, MAX_FRAMESIZE,
-        allAuto, camNumber, camList, ledList, streamClients.load(),
+        allAuto, camNumber, streamClients.load(),
         maxFps, MAX_FPS_LIMIT
     );
 
@@ -649,6 +666,7 @@ void startCameraServer(){
   config.server_port = 80;
   config.max_open_sockets = 5;
   config.lru_purge_enable = true;   // drop the oldest idle connection instead of refusing new ones
+  config.max_uri_handlers = 16;     // own pages + the internet check pages of fake_internet.h
 
   httpd_uri_t index_uri = {
     .uri = "/",
@@ -671,6 +689,13 @@ httpd_uri_t register_uri = {
     .user_ctx  = NULL
 };
 
+httpd_uri_t devices_uri = {
+    .uri       = "/devices",
+    .method    = HTTP_GET,
+    .handler   = devices_handler,
+    .user_ctx  = NULL
+};
+
 httpd_uri_t cam_ctrl = {
     .uri = "/camera",
     .method = HTTP_GET,
@@ -684,6 +709,7 @@ httpd_uri_t cam_ctrl = {
     httpd_register_uri_handler(camera_httpd, &index_uri);
     httpd_register_uri_handler(camera_httpd, &ping_uri);
     httpd_register_uri_handler(camera_httpd, &register_uri);
+    httpd_register_uri_handler(camera_httpd, &devices_uri);
     httpd_register_uri_handler(camera_httpd, &cam_ctrl);
   }
 
@@ -793,6 +819,8 @@ void connectToWifi(){
 
   // Start streaming web server
   startCameraServer();
+  // phones keep the traffic on the WiFi only when it seems to have internet
+  if (access_point == 1) startFakeInternet(camera_httpd, WiFi.softAPIP());
   setupmDNS();
 };
 

@@ -15,12 +15,43 @@
   .vertical-container img {
     max-width: 100%;
   }
+  /* camera number next to every stream: green = frame rate ok, gray = below the set max fps */
+  .cam-tile {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    max-width: 100%;
+  }
+  .cam-tile img {
+    max-width: calc(100% - 46px);
+  }
+  .cam-badge {
+    min-width: 40px;
+    padding: 6px 0;
+    border-radius: 6px;
+    text-align: center;
+    font-size: 18px;
+    font-weight: bold;
+    color: #fff;
+    background: #888;
+  }
+  .cam-badge.ok {
+    background: #0a0;
+  }
+  /* LED controls: centered like the camera images, at the top of the page */
+  #leds {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
   .led-panel {
-    margin: 20px;
+    margin: 10px;
     padding: 10px;
     border: 1px solid #888;
     border-radius: 8px;
+    width: 100%;
     max-width: 400px;
+    box-sizing: border-box;
   }
   .led-panel input[type=range] {
     width: 100%;
@@ -36,37 +67,55 @@
   .led-green { background: #0a0; }
   .led-blue  { background: #06c; }
   .led-white { background: #aaa; color: #000 !important; }
+  /* toggle buttons (cameras, advanced): outlined = off, filled = on */
+  .toggle {
+    padding: 10px;
+    margin: 5px;
+    border: 2px solid #06c;
+    border-radius: 6px;
+    background: #fff;
+    color: #06c;
+  }
+  .toggle.on {
+    background: #06c;
+    color: #fff;
+  }
   </style>
   <body>
 
+    <!-- one panel per registered LED board, filled by renderLeds() -->
+    <div id="leds"></div>
+
     <canvas id='myCanvas' width='50px' height='50px'></canvas>
     <div class="vertical-container">
-        <img id="cameraStreamID" alt="" />
-        <img id="camera2StreamID" alt="" />
-        <button id='camSel' onclick='changeCam()' style='padding:10px;margin:5px;'>Camera 1 </button>
-    </div>
-    <p>Camera: <span id='camval'>...</span></p>
-    <p>Stream: <span id='fpsval'>...</span></p>
-    <div style="display:flex; align-items:center; gap:10px;">
-      <button onclick='changeQuality(-5)' style='padding:10px;margin:5px;'>Increase Quality</button>
-      <span id='qval'> JPEG Quality: ... </span>
-      <button onclick='changeQuality(5)' style='padding:10px;margin:5px;'>Decrease Quality</button>
+        <!-- one tile (camera number + stream) per shown camera, more are added by getImg() -->
+        <div class="cam-tile"><span class="cam-badge"></span><img id="cameraStreamID" alt="" /></div>
+        <div class="cam-tile"><span class="cam-badge"></span><img id="camera2StreamID" alt="" /></div>
+        <!-- one toggle button per camera, filled by renderCamButtons() -->
+        <div id='camButtons'></div>
     </div>
     <div style="margin:20px;">
         <button id="autoBtn" onclick="toggleAuto()" style="padding:10px;">AUTO: ...</button>
         Exposure: <span id="expVal">...</span><br>
         <input type="range" id="expSlider" min="0" max="1200" value="0" oninput="setExposure(this.value)">
     </div>
-    <div style="margin:20px;">
-        FrameSize: <span id="frameVal">...</span><br>
-        <input type="range" id="frameSlider" min="0" max="5" value="5" oninput="setFrame(this.value)">
+    <button id="advBtn" class="toggle" onclick="toggleAdvanced()">Advanced</button>
+    <div id="advanced" style="display:none;">
+      <p>Stream: <span id='fpsval'>...</span></p>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <button onclick='changeQuality(-5)' style='padding:10px;margin:5px;'>Increase Quality</button>
+        <span id='qval'> JPEG Quality: ... </span>
+        <button onclick='changeQuality(5)' style='padding:10px;margin:5px;'>Decrease Quality</button>
+      </div>
+      <div style="margin:20px;">
+          FrameSize: <span id="frameVal">...</span><br>
+          <input type="range" id="frameSlider" min="0" max="5" value="5" oninput="setFrame(this.value)">
+      </div>
+      <div style="margin:20px;">
+          Max FPS: <span id="fpsLimitVal">...</span><br>
+          <input type="range" id="fpsSlider" min="1" max="30" value="12" oninput="setFps(this.value)">
+      </div>
     </div>
-    <div style="margin:20px;">
-        Max FPS: <span id="fpsLimitVal">...</span><br>
-        <input type="range" id="fpsSlider" min="1" max="30" value="12" oninput="setFps(this.value)">
-    </div>
-    <!-- one panel per registered LED board, filled by renderLeds() -->
-    <div id="leds"></div>
 
 
   </body>
@@ -77,11 +126,28 @@
     const cnvs = document.getElementById("myCanvas");
     const ctx = cnvs.getContext("2d");
     var moving = false;
-    var c='192.168.4.1';
-    // all cameras, camera 1 is the access point, the others come from its list
-    let camList = [{n: 1, ip: c}];
-    let selected = 1;   // number of the shown camera, or 'all'
+    // the access point of the network (a camera or the LED board), it knows all devices
+    const HUB = '192.168.4.1';
+    // all cameras [{n: 1, ip: '192.168.4.1'}, ...], from the list of the access point
+    let camList = [];
+    const shownCams = new Set([1]);   // numbers of the cameras switched on with their button
     const imgs = [img, img2];   // more <img> are added when more cameras are shown
+    for (const el of imgs) {
+      el._tile = el.parentElement;
+      el._badge = el._tile.querySelector('.cam-badge');
+    }
+
+    // max fps set on each camera (ip -> fps); the camera number turns gray when
+    // the received frame rate is below FPS_OK_RATIO of it
+    const targetFps = {};
+    const FPS_OK_RATIO = 0.8;
+
+    function fetchTargetFps(ip) {
+      fetch(`http://${ip}/camera`, {mode: "cors"})
+        .then(r => r.json())
+        .then(d => { if (d.fps !== undefined) targetFps[ip] = d.fps; })
+        .catch(() => {});
+    }
     //var c='http://esp32.local'
     //var c=document.location.origin
     let allAuto = 1;
@@ -202,12 +268,12 @@
       stopStream(el);
       if (!el._ip || el._ip == '0' || document.hidden) {
         if (!el._ip || el._ip == '0') {
-          el.style.display = 'none';
+          el._tile.style.display = 'none';
           el.src = EMPTY_IMG;
         }
         return;
       }
-      el.style.display = '';
+      el._tile.style.display = '';
       const ctrl = new AbortController();
       el._ctrl = ctrl;
       el._lastFrame = Date.now();
@@ -289,10 +355,15 @@
         const s = el._stat;
         if (s && el._ip && el._ip != '0' && !document.hidden) {
           const dt = (now - s.t) / 1000;
+          const fps = s.frames / dt;
           const gap = el._ctrl ? Math.max(s.maxGap, now - el._lastFrame) : s.maxGap;
-          lines.push(`Cam ${el._n} (${el._ip}): ${(s.frames / dt).toFixed(1)} fps, ` +
+          lines.push(`Cam ${el._n} (${el._ip}): ${fps.toFixed(1)} fps, ` +
                      `${(s.bytes / 1024 / dt).toFixed(0)} kB/s, ` +
                      `max gap ${gap} ms, ${el._reconnects || 0} reconnects`);
+
+          const target = targetFps[el._ip];
+          el._badge.classList.toggle('ok', !!(el._ctrl && target && fps >= FPS_OK_RATIO * target));
+          el._badge.title = `${fps.toFixed(1)} of ${target || '?'} fps`;
         }
         el._stat = {t: now, frames: 0, bytes: 0, maxGap: 0};
       }
@@ -319,10 +390,9 @@
     /* ---------- camera parameters ---------- */
 
     // cameras the parameter controls act on
+    // (= the cameras switched on)
     function targets() {
-      if (selected == 'all') return camList.map(cam => cam.ip);
-      const cam = camList.find(cam => cam.n == selected);
-      return [cam ? cam.ip : c];
+      return camList.filter(cam => shownCams.has(cam.n)).map(cam => cam.ip);
     }
 
     // one request in flight per device; while it runs only the newest
@@ -356,7 +426,10 @@
 
     function sendSet(param, value) {
       for (const ip of targets()) {
-        queueSet(ip, 'camera', param, value, d => { if (ip == targets()[0]) showParam(d); });
+        queueSet(ip, 'camera', param, value, d => {
+          if (d.fps !== undefined) targetFps[ip] = d.fps;
+          if (ip == targets()[0]) showParam(d);
+        });
       }
     }
 
@@ -387,18 +460,19 @@
     }
 
     function refreshCameraParam() {
+      if (targets().length == 0) return Promise.resolve();
       return fetch(`http://${targets()[0]}/camera`, {mode: "cors"})
         .then(r => r.json())
         .then(showParam)
         .catch(() => {});
     }
 
-    // camera 1 knows all other cameras
+    // the access point knows all cameras and LED boards
     function refreshCameraList() {
-      return fetch(`http://${c}/camera`, {mode: "cors"})
+      return fetch(`http://${HUB}/devices`, {mode: "cors"})
         .then(r => r.json())
         .then(d => {
-          if (d.cams) camList = [{n: 1, ip: c}, ...d.cams];
+          if (d.cams) camList = d.cams;
           if (d.leds) ledList = d.leds;
         })
         .catch(() => {});
@@ -407,7 +481,7 @@
 
     /* ---------- LED boards (ledCom firmware) ---------- */
 
-    let ledList = [];        // [{n: 1, ip: '192.168.4.5'}, ...] from camera 1
+    let ledList = [];        // [{n: 1, ip: '192.168.4.5'}, ...] from the access point
     const LED_COLORS = ['red', 'green', 'blue', 'white'];
 
     // one control panel per LED board, talking directly to http://<ip>/led
@@ -461,6 +535,7 @@
     // frames per second each camera sends, lower = less WiFi load
     function setFps(val) {
       document.getElementById('fpsLimitVal').innerText = val;
+      for (const ip of targets()) targetFps[ip] = parseInt(val);
       sendSet('fps', val);
     }
 
@@ -480,39 +555,61 @@
 
     /* ---------- camera selection ---------- */
 
-    // n-th <img>, created when not there yet
+    // n-th <img> (in its tile with the camera number), created when not there yet
     function getImg(i) {
       while (imgs.length <= i) {
-        const el = document.createElement('img');
-        el.alt = '';
-        document.getElementById('camSel').before(el);
+        const tile = document.createElement('div');
+        tile.className = 'cam-tile';
+        tile.innerHTML = '<span class="cam-badge"></span><img alt="" />';
+        document.getElementById('camButtons').before(tile);
+        const el = tile.querySelector('img');
+        el._tile = tile;
+        el._badge = tile.querySelector('.cam-badge');
         imgs.push(el);
       }
       return imgs[i];
     }
 
-    function showCamState() {
-      if (selected != 'all' && !camList.some(cam => cam.n == selected)) selected = 1;
-      if (selected == 'all' && camList.length < 2) selected = 1;
-      const shown = (selected == 'all') ? camList : camList.filter(cam => cam.n == selected);
+    // one toggle button per known camera
+    function renderCamButtons() {
+      const box = document.getElementById('camButtons');
+      box.innerHTML = '';
+      for (const cam of camList) {
+        const b = document.createElement('button');
+        b.className = 'toggle' + (shownCams.has(cam.n) ? ' on' : '');
+        b.innerText = 'Camera ' + cam.n;
+        b.onclick = () => toggleCam(cam.n);
+        box.appendChild(b);
+      }
+    }
 
-      document.getElementById('camSel').innerText = (selected == 'all') ? 'All cameras' : 'Camera ' + selected;
-      document.getElementById('camval').innerText = targets().join(' + ');
+    function toggleCam(n) {
+      if (shownCams.has(n)) shownCams.delete(n);
+      else shownCams.add(n);
+      showCamState();
+    }
+
+    // show the streams of all cameras switched on
+    function showCamState() {
+      const shown = camList.filter(cam => shownCams.has(cam.n));
+
+      renderCamButtons();
       for (let i = 0; i < Math.max(imgs.length, shown.length); i++) {
         const el = getImg(i);
         el._n = shown[i] ? shown[i].n : 0;
+        el._badge.innerText = el._n || '';
         setStream(el, shown[i] ? shown[i].ip : null);
       }
+      for (const cam of shown) fetchTargetFps(cam.ip);
       refreshCameraParam();
     }
 
-    // Camera 1 -> 2 -> ... -> All cameras -> Camera 1
-    async function changeCam() {
-      await refreshCameraList();
-      const order = camList.map(cam => cam.n);
-      if (order.length > 1) order.push('all');
-      selected = order[(order.indexOf(selected) + 1) % order.length];
-      showCamState();
+    // show / hide quality, framesize and max fps
+    function toggleAdvanced() {
+      const box = document.getElementById('advanced');
+      const open = box.style.display == 'none';
+      box.style.display = open ? '' : 'none';
+      document.getElementById('advBtn').classList.toggle('on', open);
     }
 
     // cameras come and go: keep the list current
@@ -521,11 +618,12 @@
       const ledsBefore = JSON.stringify(ledList);
       await refreshCameraList();
       if (JSON.stringify(camList) != camsBefore) showCamState();
+      else for (const ip of targets()) fetchTargetFps(ip);   // max fps may be changed from another phone
       if (JSON.stringify(ledList) != ledsBefore) renderLeds();
     }, 5000);
 
     showCamState();
-    refreshCameraList().then(renderLeds);
+    refreshCameraList().then(() => { showCamState(); renderLeds(); });
 
   </script>
   </html>
