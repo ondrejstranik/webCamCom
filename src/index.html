@@ -247,17 +247,44 @@
     const targetFps = {};
     const FPS_OK_RATIO = 0.8;
 
-    // camera sensor of each camera (ip -> 'OV2640' / 'OV3660'), shown in the stream info
+    // shown in the stream info: camera sensor of each camera (ip -> 'OV2640'),
+    // WiFi signal in dBm as the camera receives the access point (ip -> -58, 'ap' for
+    // the access point itself), as the access point receives each device (ip -> -60),
+    // and as the access point receives this phone / computer
     const sensors = {};
+    const camRssi = {};
+    const apRssi = {};
+    let youRssi = 0;
 
-    function fetchTargetFps(ip) {
+    function fetchCamStatus(ip) {
       fetch(`http://${ip}/camera`, {mode: "cors"})
         .then(r => r.json())
         .then(d => {
           if (d.fps !== undefined) targetFps[ip] = d.fps;
           if (d.sensor) sensors[ip] = d.sensor;
+          if (d.ap) camRssi[ip] = 'ap';
+          else if (d.rssi) camRssi[ip] = d.rssi;
         })
         .catch(() => {});
+    }
+
+    function fetchApWifi() {
+      fetch(`http://${HUB}/wifi`, {mode: "cors"})
+        .then(r => r.json())
+        .then(d => {
+          if (!d.ap) return;
+          youRssi = d.you || 0;
+          for (const k in apRssi) delete apRssi[k];
+          for (const st of d.stations) apRssi[st.ip] = st.rssi;
+        })
+        .catch(() => {});
+    }
+
+    function wifiText(ip) {
+      if (camRssi[ip] == 'ap') return 'WiFi: access point';
+      const hears = camRssi[ip] ? camRssi[ip] + ' dBm' : '?';
+      const heard = apRssi[ip] ? apRssi[ip] + ' dBm' : '?';
+      return `WiFi: receives AP ${hears}, AP receives ${heard}`;
     }
     //var c='http://esp32.local'
     //var c=document.location.origin
@@ -451,7 +478,7 @@
           const dt = (now - s.t) / 1000;
           const fps = s.frames / dt;
           const gap = el._ctrl ? Math.max(s.maxGap, now - el._lastFrame) : s.maxGap;
-          lines.push(`Cam ${el._n} (${sensors[el._ip] || '?'}, ${el._ip}): ${fps.toFixed(1)} fps, ` +
+          lines.push(`Cam ${el._n} (${sensors[el._ip] || '?'}, ${el._ip}, ${wifiText(el._ip)}): ${fps.toFixed(1)} fps, ` +
                      `${(s.bytes / 1024 / dt).toFixed(0)} kB/s, ` +
                      `max gap ${gap} ms, ${el._reconnects || 0} reconnects`);
 
@@ -461,7 +488,8 @@
         }
         el._stat = {t: now, frames: 0, bytes: 0, maxGap: 0};
       }
-      document.getElementById('fpsval').innerText = lines.length ? lines.join('\n') : '-';
+      lines.unshift('This device: ' + (youRssi ? `access point receives it with ${youRssi} dBm` : '?'));
+      document.getElementById('fpsval').innerText = lines.join('\n');
     }, 1000);
 
     // reopen streams that stopped delivering frames
@@ -1113,7 +1141,7 @@
         el._badge.innerText = el._n || '';
         setStream(el, shown[i] ? shown[i].ip : null);
       }
-      for (const cam of shown) fetchTargetFps(cam.ip);
+      for (const cam of shown) fetchCamStatus(cam.ip);
       refreshCameraParam();
     }
 
@@ -1131,9 +1159,16 @@
       const ledsBefore = JSON.stringify(ledList);
       await refreshCameraList();
       if (JSON.stringify(camList) != camsBefore) showCamState();
-      else for (const ip of targets()) fetchTargetFps(ip);   // max fps may be changed from another phone
       if (JSON.stringify(ledList) != ledsBefore) renderLeds();
     }, 5000);
+
+    // WiFi signal (and max fps, which may be changed from another phone) of the
+    // shown cameras, often enough to follow a camera that is moved
+    setInterval(() => {
+      if (document.hidden) return;
+      for (const ip of targets()) fetchCamStatus(ip);
+      fetchApWifi();
+    }, 2000);
 
     showCamState();
     refreshCameraList().then(() => { showCamState(); renderLeds(); });

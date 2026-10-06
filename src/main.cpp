@@ -29,6 +29,7 @@
 
 #include "index_html_gz.h"
 #include "fake_internet.h"
+#include "ap_wifi.h"
 
 
 //Replace with your network credentials
@@ -506,12 +507,14 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         "\"saturation\":%d,\"framesize\":%d,\"maxFramesize\":%d,"
         "\"allAuto\":%d,\"agc\":%d,\"agc_gain\":%d,\"awb\":%d,\"wb_mode\":%d,"
         "\"wb_r\":%d,\"wb_g\":%d,\"wb_b\":%d,\"number\":%d,\"streamClients\":%d,"
-        "\"fps\":%d,\"maxFpsLimit\":%d,\"sensor\":\"%s\"}",
+        "\"fps\":%d,\"maxFpsLimit\":%d,\"sensor\":\"%s\",\"ap\":%d,\"rssi\":%d}",
         quality, exposure, auto_exp,
         gain, brightness, contrast, saturation, framesize, MAX_FRAMESIZE,
         allAuto, s->status.agc, s->status.agc_gain, s->status.awb, s->status.wb_mode,
         wbR, wbG, wbB, camNumber, streamClients.load(),
-        maxFps, MAX_FPS_LIMIT, sensorName
+        maxFps, MAX_FPS_LIMIT, sensorName,
+        // WiFi signal of a station camera to the access point in dBm (0 = access point / not connected)
+        access_point, (access_point == 0 && WiFi.status() == WL_CONNECTED) ? (int)WiFi.RSSI() : 0
     );
 
     httpd_resp_set_type(req, "application/json");
@@ -921,6 +924,8 @@ void connectToWifi(){
   startCameraServer();
   // phones keep the traffic on the WiFi only when it seems to have internet
   if (access_point == 1) startFakeInternet(camera_httpd, WiFi.softAPIP());
+  // signal of every device as received by the access point ({"ap":0} on a station)
+  startApWifi(camera_httpd, &access_point);
   setupmDNS();
 };
 
