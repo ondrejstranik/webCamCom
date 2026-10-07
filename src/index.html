@@ -39,13 +39,13 @@
     background: #0a0;
   }
   /* pixel mean chart under the camera images */
-  #sumBox, #profileBox {
+  #sumBox, #profileBox, #focusBox, #circleBox, #wifiBox, #metricBoxes {
     width: 100%;
     max-width: 400px;
     font-size: 14px;
     color: #333;
   }
-  #sumChart, #profileChart {
+  #sumChart, #profileChart, #focusChart, #wifiChart, .metric-chart {
     display: block;
     width: 100%;
     height: 160px;
@@ -165,6 +165,30 @@
             <span class="sum-key"><i style="background:#2b6cd4"></i>B <b id="sumB">-</b></span>
             <span id="sumWhen"></span>
           </div>
+        </div>
+        <!-- sharpness (Tenengrad) inside the pink circle, last 100 frames -->
+        <div id="focusBox" style="display:none;">
+          <div id="focusInfo">...</div>
+          <canvas id="focusChart" aria-label="Sharpness inside the pink circle, last 100 frames"></canvas>
+          <div>
+            Focus <b id="focusVal">-</b> &nbsp; best <b id="focusBestVal">-</b>
+            <span id="focusWhen" class="sum-where"></span>
+            <button class="toggle" onclick="resetFocusBest()">Reset best</button>
+          </div>
+        </div>
+        <!-- WiFi signal of every device of the network, sampled every 2 s -->
+        <div id="wifiBox" style="display:none;">
+          <div>WiFi signal (dBm), every 2 s, last 100 samples (about 3 min).<br>
+            Solid: access point receives the device (carries the video).
+            Dashed: the camera receives the access point.</div>
+          <canvas id="wifiChart" aria-label="WiFi signal of every device in dBm, last 100 samples"></canvas>
+          <div id="wifiLegend"></div>
+          <div id="wifiWhen" class="sum-where"></div>
+        </div>
+        <!-- frame rate / transfer time / max gap of every shown camera, filled by buildMetricBoxes() -->
+        <div id="metricBoxes"></div>
+        <!-- size of the pink circle, used by Mean and Focus -->
+        <div id="circleBox" style="display:none;">
           Circle diameter: <span id="sumDiaVal">48</span> px<br>
           <input type="range" id="sumDiaSlider" min="4" max="200" value="48" oninput="setSumDiameter(this.value)" style="width:100%;">
         </div>
@@ -189,7 +213,7 @@
         <button id="autoBtn" class="toggle" onclick="toggleAuto()">AUTO: ...</button>
         <div id="manual" style="display:none;">
           Exposure: <span id="expVal">...</span><br>
-          <input type="range" id="expSlider" min="0" max="1200" value="0" oninput="setExposure(this.value)"><br>
+          <input type="range" id="expSlider" min="0" max="332" value="0" oninput="setExposure(this.value)"><br>
           Gain: <span id="gainVal">...</span><br>
           <input type="range" id="gainSlider" min="0" max="30" value="0" oninput="setGain(this.value)"><br>
           White balance (64 = 1x):
@@ -204,7 +228,15 @@
     </div>
     <button id="sumBtn" class="toggle" onclick="toggleSum()">Mean</button>
     <button id="profileBtn" class="toggle" onclick="toggleProfile()">Profile</button>
+    <button id="focusBtn" class="toggle" onclick="toggleFocus()">Focus</button>
     <button id="advBtn" class="toggle" onclick="toggleAdvanced()">Advanced</button>
+    <!-- charts of the connection, only while Advanced is on -->
+    <div id="advCharts" style="display:none;">
+      <button id="wifiBtn" class="toggle" onclick="toggleWifi()">Wifi</button>
+      <button id="fpsBtn" class="toggle" onclick="toggleMetric('fps')">FPS</button>
+      <button id="xferBtn" class="toggle" onclick="toggleMetric('xfer')">Transfer</button>
+      <button id="gapBtn" class="toggle" onclick="toggleMetric('gap')">Gap</button>
+    </div>
     <div id="advanced" style="display:none;">
       <p>Stream: <span id='fpsval'>...</span></p>
       <div style="display:flex; align-items:center; gap:10px;">
@@ -218,7 +250,7 @@
       </div>
       <div style="margin:20px;">
           Max FPS: <span id="fpsLimitVal">...</span><br>
-          <input type="range" id="fpsSlider" min="1" max="30" value="12" oninput="setFps(this.value)">
+          <input type="range" id="fpsSlider" min="1" max="50" value="12" oninput="setFps(this.value)">
       </div>
     </div>
 
@@ -253,8 +285,10 @@
     // and as the access point receives this phone / computer
     const sensors = {};
     const camRssi = {};
+    const camRssiTime = {};   // ip -> Date.now() of the last answer, old values are not plotted
     const apRssi = {};
     let youRssi = 0;
+    let youIp = '';           // ip of this phone / computer in the network
 
     function fetchCamStatus(ip) {
       fetch(`http://${ip}/camera`, {mode: "cors"})
@@ -264,6 +298,7 @@
           if (d.sensor) sensors[ip] = d.sensor;
           if (d.ap) camRssi[ip] = 'ap';
           else if (d.rssi) camRssi[ip] = d.rssi;
+          camRssiTime[ip] = Date.now();
         })
         .catch(() => {});
     }
@@ -274,6 +309,7 @@
         .then(d => {
           if (!d.ap) return;
           youRssi = d.you || 0;
+          youIp = d.you_ip || '';
           for (const k in apRssi) delete apRssi[k];
           for (const st of d.stations) apRssi[st.ip] = st.rssi;
         })
@@ -424,39 +460,64 @@
       if (!r.ok || !r.body) throw new Error('stream http ' + r.status);
       const reader = r.body.getReader();
       const decoder = new TextDecoder();
-      let buf = new Uint8Array(0);
+      let head = new Uint8Array(0);   // header bytes of the next part
+      let frame = null;               // jpeg being received (size from Content-Length)
+      let filled = 0;
+      let partStart = null;           // arrival time of the first byte of the current part
+      const onlyCrLf = d => d.every(b => b == 13 || b == 10);
+
       while (true) {
         const {done, value} = await reader.read();
         if (done) return;
-        const joined = new Uint8Array(buf.length + value.length);
-        joined.set(buf);
-        joined.set(value, buf.length);
-        buf = joined;
+        const now = Date.now();
+        // the "\r\n" after a jpeg does not start the next part (the camera may wait before it)
+        if (partStart == null && !onlyCrLf(value)) partStart = now;
+        let data = value;
 
-        while (true) {
-          const hdrEnd = indexOf(buf, CRLF2, 0);
+        while (data.length) {
+          if (frame) {
+            const take = Math.min(frame.length - filled, data.length);
+            frame.set(data.subarray(0, take), filled);
+            filled += take;
+            data = data.subarray(take);
+            if (filled == frame.length) {
+              // transfer time: first to last byte of the part, i.e. the WiFi part of the delay
+              showFrame(el, frame, partStart != null ? now - partStart : 0);
+              frame = null;
+              partStart = onlyCrLf(data) ? null : now;
+            }
+            continue;
+          }
+
+          const joined = new Uint8Array(head.length + data.length);
+          joined.set(head);
+          joined.set(data, head.length);
+          head = joined;
+          data = new Uint8Array(0);
+          const hdrEnd = indexOf(head, CRLF2, 0);
           if (hdrEnd < 0) {
-            if (buf.length > 1024) buf = buf.slice(buf.length - 3);  // garbage, resync
+            if (head.length > 1024) head = head.slice(head.length - 3);  // garbage, resync
             break;
           }
-          const m = /Content-Length:\s*(\d+)/i.exec(decoder.decode(buf.subarray(0, hdrEnd)));
-          const start = hdrEnd + 4;
-          if (!m) { buf = buf.slice(start); continue; }
-          const len = parseInt(m[1]);
-          if (buf.length < start + len) break;   // frame not complete yet
-          showFrame(el, buf.slice(start, start + len));
-          buf = buf.slice(start + len);
+          const m = /Content-Length:\s*(\d+)/i.exec(decoder.decode(head.subarray(0, hdrEnd)));
+          data = head.subarray(hdrEnd + 4);
+          head = new Uint8Array(0);
+          if (!m) continue;
+          frame = new Uint8Array(parseInt(m[1]));
+          filled = 0;
         }
       }
     }
 
-    function showFrame(el, jpg) {
+    function showFrame(el, jpg, transferMs) {
       const now = Date.now();
       const s = el._stat;
       if (s) {
         s.frames++;
         s.bytes += jpg.length;
         s.maxGap = Math.max(s.maxGap, now - el._lastFrame);
+        s.xferSum += transferMs;
+        s.xferMax = Math.max(s.xferMax, transferMs);
       }
       el._lastFrame = now;
       const old = el._url;
@@ -464,7 +525,7 @@
       el._url = URL.createObjectURL(blob);
       el.src = el._url;
       if (old) URL.revokeObjectURL(old);
-      if (sumOn || profileOn) analyzeFrame(el, blob);
+      if (sumOn || profileOn || focusOn) analyzeFrame(el, blob);
     }
 
     // every second: frame rate, data rate and the longest pause between two
@@ -472,24 +533,34 @@
     setInterval(() => {
       const now = Date.now();
       const lines = [];
+      const sample = {fps: {}, xfer: {}, gap: {}};   // for the FPS / Transfer / Gap charts
       for (const el of imgs) {
         const s = el._stat;
         if (s && el._ip && el._ip != '0' && !document.hidden) {
           const dt = (now - s.t) / 1000;
           const fps = s.frames / dt;
           const gap = el._ctrl ? Math.max(s.maxGap, now - el._lastFrame) : s.maxGap;
+          sample.fps[el._n] = fps;
+          sample.gap[el._n] = gap;
+          if (s.frames) sample.xfer[el._n] = s.xferSum / s.frames;
+          // frame size and transfer time (first to last byte of a frame) over this second
+          const xfer = s.frames
+            ? `frame ${(s.bytes / 1024 / s.frames).toFixed(0)} kB, ` +
+              `transfer ${(s.xferSum / s.frames).toFixed(0)} ms (max ${s.xferMax} ms), `
+            : '';
           lines.push(`Cam ${el._n} (${sensors[el._ip] || '?'}, ${el._ip}, ${wifiText(el._ip)}): ${fps.toFixed(1)} fps, ` +
-                     `${(s.bytes / 1024 / dt).toFixed(0)} kB/s, ` +
+                     `${(s.bytes / 1024 / dt).toFixed(0)} kB/s, ${xfer}` +
                      `max gap ${gap} ms, ${el._reconnects || 0} reconnects`);
 
           const target = targetFps[el._ip];
           el._badge.classList.toggle('ok', !!(el._ctrl && target && fps >= FPS_OK_RATIO * target));
           el._badge.title = `${fps.toFixed(1)} of ${target || '?'} fps`;
         }
-        el._stat = {t: now, frames: 0, bytes: 0, maxGap: 0};
+        el._stat = {t: now, frames: 0, bytes: 0, maxGap: 0, xferSum: 0, xferMax: 0};
       }
       lines.unshift('This device: ' + (youRssi ? `access point receives it with ${youRssi} dBm` : '?'));
       document.getElementById('fpsval').innerText = lines.join('\n');
+      metricSample(sample);
     }, 1000);
 
     // reopen streams that stopped delivering frames
@@ -530,6 +601,15 @@
     let profileCross = 0;     // index of the cross position along the line
     let profileHover = null;  // index of the hovered pixel, null = cross position
     let profileThickness = 1; // image pixels across the line that are averaged
+    // Focus: sharpness inside the pink circle (Tenengrad: mean squared Sobel
+    // gradient of the brightness, divided by the squared mean brightness so it
+    // does not follow the exposure), the last SUM_LEN frames and the best value
+    let focusOn = false;
+    let focusHist = {f: []};
+    let focusCam = 0;         // camera number the history belongs to
+    let focusBest = null;     // highest value since the last reset
+    let focusHover = null;    // index of the hovered value, null = latest
+    const FOCUS_SERIES = [{key: 'f', color: '#6a3fb5'}];
     const work = document.createElement('canvas');
     const workCtx = work.getContext('2d', {willReadFrequently: true});
 
@@ -542,6 +622,25 @@
       placeOverlays();
       showAnalysisInfo();
       drawSum();
+    }
+
+    function toggleFocus() {
+      focusOn = !focusOn;
+      document.getElementById('focusBtn').classList.toggle('on', focusOn);
+      document.getElementById('focusBox').style.display = focusOn ? '' : 'none';
+      focusHist = {f: []};
+      focusBest = null;
+      focusCam = 0;
+      placeOverlays();
+      showAnalysisInfo();
+      drawFocus();
+    }
+
+    // start looking for a new best value (e.g. after the scene changed)
+    function resetFocusBest() {
+      const n = focusHist.f.length;
+      focusBest = n ? focusHist.f[n - 1] : null;
+      drawFocus();
     }
 
     function toggleProfile() {
@@ -575,8 +674,11 @@
       sumDiameter = parseInt(val);
       document.getElementById('sumDiaVal').innerText = sumDiameter;
       sumHist = {r: [], g: [], b: []};
+      focusHist = {f: []};
+      focusBest = null;
       placeOverlays();
       drawSum();
+      drawFocus();
     }
 
     // the shown stream image the center of the cross is on, or null
@@ -598,9 +700,12 @@
       const cx = (parseFloat(cnvs.style.left) || 0) + cnvs.offsetWidth / 2;
       const cy = (parseFloat(cnvs.style.top) || 0) + cnvs.offsetHeight / 2;
 
+      // the circle and its diameter slider are used by Mean and Focus
+      const circleOn = sumOn || focusOn;
+      document.getElementById('circleBox').style.display = circleOn ? '' : 'none';
       const circle = document.getElementById('sumCircle');
-      circle.style.display = sumOn ? 'block' : 'none';   // the stylesheet hides it by default
-      if (sumOn) {
+      circle.style.display = circleOn ? 'block' : 'none';   // the stylesheet hides it by default
+      if (circleOn) {
         circle.style.width = circle.style.height = sumDiameter + 'px';
         circle.style.left = (cx - sumDiameter / 2) + 'px';
         circle.style.top = (cy - sumDiameter / 2) + 'px';
@@ -632,9 +737,11 @@
         ? `Camera ${el._n}: mean inside the pink circle, last ${SUM_LEN} frames` : none;
       document.getElementById('profileInfo').innerText = el
         ? `Camera ${el._n}: ${profileDir == 'h' ? 'horizontal' : 'vertical'} profile through the cross` : none;
+      document.getElementById('focusInfo').innerText = el
+        ? `Camera ${el._n}: sharpness inside the pink circle, last ${SUM_LEN} frames` : none;
     }
 
-    // called for every received frame while Mean or Profile is on
+    // called for every received frame while Mean, Profile or Focus is on
     function analyzeFrame(el, blob) {
       if (el._analyzing || el !== crossTarget()) return;
       el._analyzing = true;
@@ -647,6 +754,7 @@
         const cy = (c.top + c.height / 2 - r.top) * scale;
         if (sumOn) sumFrame(el, bmp, cx, cy, scale);
         if (profileOn) profileFrame(bmp, cx, cy);
+        if (focusOn) focusFrame(el, bmp, cx, cy, scale);
         bmp.close();
       }).catch(() => {}).finally(() => { el._analyzing = false; });
     }
@@ -727,14 +835,79 @@
       drawProfile();
     }
 
+    // sharpness inside the circle: brightness of each pixel, Sobel gradient at
+    // every pixel inside the circle (its 3x3 neighbours may lie just outside),
+    // mean squared gradient / squared mean brightness
+    function focusFrame(el, bmp, cx, cy, scale) {
+      const radius = sumDiameter / 2 * scale;
+      const x0 = Math.max(0, Math.floor(cx - radius) - 1);
+      const y0 = Math.max(0, Math.floor(cy - radius) - 1);
+      const x1 = Math.min(bmp.width, Math.ceil(cx + radius) + 1);
+      const y1 = Math.min(bmp.height, Math.ceil(cy + radius) + 1);
+      const w = x1 - x0, h = y1 - y0;
+      if (w < 3 || h < 3) return;
+
+      work.width = w;
+      work.height = h;
+      workCtx.drawImage(bmp, x0, y0, w, h, 0, 0, w, h);
+      const px = workCtx.getImageData(0, 0, w, h).data;
+      const L = new Float32Array(w * h);
+      for (let i = 0; i < w * h; i++) {
+        L[i] = 0.299 * px[i * 4] + 0.587 * px[i * 4 + 1] + 0.114 * px[i * 4 + 2];
+      }
+
+      let grad = 0, bright = 0, count = 0;
+      const r2 = radius * radius;
+      for (let y = 1; y < h - 1; y++) {
+        const dy = y0 + y + 0.5 - cy;
+        for (let x = 1; x < w - 1; x++) {
+          const dx = x0 + x + 0.5 - cx;
+          if (dx * dx + dy * dy > r2) continue;
+          const i = y * w + x;
+          const gx = (L[i - w + 1] + 2 * L[i + 1] + L[i + w + 1]) - (L[i - w - 1] + 2 * L[i - 1] + L[i + w - 1]);
+          const gy = (L[i + w - 1] + 2 * L[i + w] + L[i + w + 1]) - (L[i - w - 1] + 2 * L[i - w] + L[i - w + 1]);
+          grad += gx * gx + gy * gy;
+          bright += L[i];
+          count++;
+        }
+      }
+      if (!count) return;
+      const mean = bright / count;
+      if (mean < 1) return;                      // black image: no meaningful value
+      const value = (grad / count) / (mean * mean);
+
+      // another camera under the cross: start a new history
+      if (el._n != focusCam) {
+        focusCam = el._n;
+        focusHist = {f: []};
+        focusBest = null;
+        showAnalysisInfo();
+      }
+      focusHist.f.push(value);
+      if (focusHist.f.length > SUM_LEN) focusHist.f.shift();
+      if (focusBest == null || value > focusBest) focusBest = value;
+      drawFocus();
+    }
+
+    function fmtFocus(v) {
+      return v >= 100 ? v.toFixed(0) : v.toPrecision(3);
+    }
+
     function fmtMean(v) {
       return v.toFixed(1);
     }
 
-    // line chart of the three channels on one axis.
+    // line chart, all lines on one axis.
+    // o.series: the lines [{key, color, dash}] (default red, green, blue); a null
+    //   value is a gap in the line,
     // o.slots: positions on the x axis, o.offset: slot of the first value,
-    // o.lo / o.hi: fixed value range (auto when undefined), o.hover / o.mark: highlighted index
-    function drawRgbChart(cv, data, o) {
+    // o.lo / o.hi: fixed value range (auto when undefined), o.hover / o.mark: highlighted index,
+    // o.refs: dashed horizontal reference lines [{v, label}] (or o.ref / o.refLabel for one)
+    const RGB_SERIES = ['r', 'g', 'b'].map(k => ({key: k, color: RGB_COLORS[k]}));
+
+    function drawChart(cv, data, o) {
+      const series = o.series || RGB_SERIES;
+      const refs = o.refs || (o.ref != null ? [{v: o.ref, label: o.refLabel}] : []);
       const dpr = window.devicePixelRatio || 1;
       const W = cv.clientWidth, H = cv.clientHeight;
       if (!W || !H) return;
@@ -745,12 +918,14 @@
       const g = cv.getContext('2d');
       g.setTransform(dpr, 0, 0, dpr, 0, 0);
       g.clearRect(0, 0, W, H);
-      const n = data.r.length;
+      const n = series.length ? data[series[0].key].length : 0;
       if (!n) return;
 
       let lo = o.lo, hi = o.hi;
       if (lo === undefined) {
-        const all = [...data.r, ...data.g, ...data.b];
+        const all = series.flatMap(s => data[s.key]).filter(v => v != null);
+        for (const r of refs) all.push(r.v);
+        if (!all.length) return;
         lo = Math.min(...all);
         hi = Math.max(...all);
         if (hi == lo) { hi += 1; lo -= 1; }
@@ -794,15 +969,39 @@
       if (o.mark != null) vline(o.mark, '#bbb', [3, 3]);
       if (o.hover != null && o.hover < n) vline(o.hover, '#999', []);
 
-      // the three channels, 2px lines
+      // reference lines with their label at the right end
+      for (const r of refs) {
+        const y = Math.round(Y(r.v)) + 0.5;
+        g.strokeStyle = '#888';
+        g.setLineDash([5, 4]);
+        g.beginPath();
+        g.moveTo(CHART.left, y);
+        g.lineTo(W - CHART.right, y);
+        g.stroke();
+        g.setLineDash([]);
+        g.fillStyle = '#555';
+        g.textAlign = 'right';
+        g.textBaseline = 'bottom';
+        g.fillText(r.label || '', W - CHART.right, y - 2);
+      }
+
+      // the lines, 2px; a null value interrupts the line
       g.lineWidth = 2;
       g.lineJoin = 'round';
-      for (const ch of ['r', 'g', 'b']) {
-        g.strokeStyle = RGB_COLORS[ch];
+      for (const s of series) {
+        g.strokeStyle = s.color;
+        g.setLineDash(s.dash || []);
         g.beginPath();
-        data[ch].forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v)));
+        let pen = false;
+        data[s.key].forEach((v, i) => {
+          if (v == null) { pen = false; return; }
+          if (pen) g.lineTo(X(i), Y(v));
+          else g.moveTo(X(i), Y(v));
+          pen = true;
+        });
         g.stroke();
       }
+      g.setLineDash([]);
     }
 
     // index of the value under the pointer, null = outside
@@ -828,9 +1027,24 @@
       showLegend('sum', sumHist, shown, fmtMean);
       document.getElementById('sumWhen').innerText =
         !n ? '' : (shown == n - 1 ? 'latest' : `${n - 1 - shown} frames ago`);
-      drawRgbChart(document.getElementById('sumChart'), sumHist, {
+      drawChart(document.getElementById('sumChart'), sumHist, {
         slots: SUM_LEN, offset: SUM_LEN - n, fmt: fmtMean,
         xLabel: `last ${SUM_LEN} frames`, hover: sumHover,
+      });
+    }
+
+    // the newest value is at the right, the dashed line is the best value so far
+    function drawFocus() {
+      const n = focusHist.f.length;
+      const shown = (focusHover != null && focusHover < n) ? focusHover : n - 1;
+      document.getElementById('focusVal').innerText = n ? fmtFocus(focusHist.f[shown]) : '-';
+      document.getElementById('focusBestVal').innerText = focusBest != null ? fmtFocus(focusBest) : '-';
+      document.getElementById('focusWhen').innerText =
+        !n ? '' : (shown == n - 1 ? 'latest' : `${n - 1 - shown} frames ago`);
+      drawChart(document.getElementById('focusChart'), focusHist, {
+        series: FOCUS_SERIES, slots: SUM_LEN, offset: SUM_LEN - n, fmt: fmtFocus,
+        xLabel: `last ${SUM_LEN} frames`, hover: focusHover,
+        ref: focusBest, refLabel: 'best',
       });
     }
 
@@ -842,7 +1056,7 @@
       const axis = profileDir == 'h' ? 'x' : 'y';
       document.getElementById('profWhere').innerText =
         !n ? '' : `${axis} = ${shown} px${shown == profileCross ? ' (cross)' : ''}`;
-      drawRgbChart(document.getElementById('profileChart'), profile, {
+      drawChart(document.getElementById('profileChart'), profile, {
         slots: n, offset: 0, lo: 0, hi: 255, fmt: v => v.toFixed(0),
         xLabel: `pixel ${axis} (0 - ${n - 1})`, hover: profileHover, mark: profileCross,
       });
@@ -865,9 +1079,220 @@
     });
     profileChart.addEventListener('pointerleave', () => { profileHover = null; drawProfile(); });
 
+    const focusChart = document.getElementById('focusChart');
+    focusChart.addEventListener('pointermove', e => {
+      const n = focusHist.f.length;
+      focusHover = chartIndex(focusChart, e, SUM_LEN, SUM_LEN - n, n);
+      drawFocus();
+    });
+    focusChart.addEventListener('pointerleave', () => { focusHover = null; drawFocus(); });
+
+    /* ---------- WiFi signal of all devices ---------- */
+
+    // one sample every 2 s (with the status queries), the last WIFI_LEN kept.
+    // series key = device + ':up' (the access point receives the device, carries
+    // the video) or ':down' (the camera receives the access point)
+    const WIFI_LEN = 100;
+    const WIFI_MS = 2000;
+    // categorical colors in fixed order; a device keeps its color while it comes and goes
+    const WIFI_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948'];
+    let wifiOn = false;
+    let wifiHist = {};        // series key -> dBm values (null = no value), all wifiLen long
+    let wifiLen = 0;
+    let wifiHover = null;
+
+    function toggleWifi() {
+      wifiOn = !wifiOn;
+      document.getElementById('wifiBtn').classList.toggle('on', wifiOn);
+      document.getElementById('wifiBox').style.display = wifiOn ? '' : 'none';
+      wifiHist = {};
+      wifiLen = 0;
+      if (wifiOn) for (const cam of camList) fetchCamStatus(cam.ip);
+      fetchApWifi();
+      drawWifi();
+    }
+
+    // device part of a series key: 'you', 'cam2', 'led1' or 'ip192.168.4.7'
+    function wifiDevice(key) {
+      return key.split(':')[0];
+    }
+
+    // this device, cameras by number, LED boards, other devices (e.g. a second phone)
+    function wifiOrder(dev) {
+      if (dev == 'you') return 0;
+      if (dev.startsWith('cam')) return parseInt(dev.slice(3));
+      if (dev.startsWith('led')) return 10 + parseInt(dev.slice(3));
+      return 20;
+    }
+
+    function wifiColor(dev) {
+      const i = dev == 'you' ? 0
+        : dev.startsWith('cam') ? parseInt(dev.slice(3))
+        : dev.startsWith('led') ? 5 + parseInt(dev.slice(3))
+        : 7;
+      return WIFI_COLORS[Math.min(i, WIFI_COLORS.length - 1)];
+    }
+
+    function wifiLabel(dev) {
+      if (dev == 'you') return 'This device';
+      if (dev.startsWith('cam')) return 'Camera ' + dev.slice(3);
+      if (dev.startsWith('led')) return 'LED ' + dev.slice(3);
+      return dev.slice(2);
+    }
+
+    function wifiSample() {
+      const now = Date.now();
+      const values = {};
+      const clamp = v => Math.max(-95, Math.min(-25, v));
+      if (youRssi) values['you:up'] = clamp(youRssi);
+      for (const cam of camList) {
+        const fresh = now - (camRssiTime[cam.ip] || 0) < 3 * WIFI_MS;
+        if (apRssi[cam.ip]) values[`cam${cam.n}:up`] = clamp(apRssi[cam.ip]);
+        if (fresh && typeof camRssi[cam.ip] == 'number') values[`cam${cam.n}:down`] = clamp(camRssi[cam.ip]);
+      }
+      for (const led of ledList) {
+        if (apRssi[led.ip]) values[`led${led.n}:up`] = clamp(apRssi[led.ip]);
+      }
+      for (const ip in apRssi) {
+        if (ip == youIp || camList.some(c => c.ip == ip) || ledList.some(l => l.ip == ip)) continue;
+        values[`ip${ip}:up`] = clamp(apRssi[ip]);
+      }
+
+      for (const key in values) {
+        if (!wifiHist[key]) wifiHist[key] = new Array(wifiLen).fill(null);
+      }
+      for (const key in wifiHist) {
+        wifiHist[key].push(key in values ? values[key] : null);
+        if (wifiHist[key].length > WIFI_LEN) wifiHist[key].shift();
+        if (wifiHist[key].every(v => v == null)) delete wifiHist[key];
+      }
+      wifiLen = Math.min(wifiLen + 1, WIFI_LEN);
+      drawWifi();
+    }
+
+    function drawWifi() {
+      const keys = Object.keys(wifiHist).sort((a, b) =>
+        wifiOrder(wifiDevice(a)) - wifiOrder(wifiDevice(b)) || (a.endsWith(':up') ? -1 : 1));
+      const series = keys.map(k => ({
+        key: k, color: wifiColor(wifiDevice(k)), dash: k.endsWith(':down') ? [6, 4] : null,
+      }));
+      const n = wifiLen;
+      const shown = (wifiHover != null && wifiHover < n) ? wifiHover : n - 1;
+
+      // legend: one entry per device with both directions of that sample
+      const fmt = v => v == null ? '-' : v + ' dBm';
+      const devices = [...new Set(keys.map(wifiDevice))];
+      const ap = camList.find(c => camRssi[c.ip] == 'ap');
+      document.getElementById('wifiLegend').innerHTML = devices.map(dev => {
+        const up = wifiHist[dev + ':up'], down = wifiHist[dev + ':down'];
+        let text = `AP receives ${fmt(up ? up[shown] : null)}`;
+        if (dev.startsWith('cam')) text += `, receives AP ${fmt(down ? down[shown] : null)}`;
+        return `<div class="sum-key"><i style="background:${wifiColor(dev)}"></i>` +
+               `${wifiLabel(dev)}: ${text}</div>`;
+      }).join('') + (ap ? `<div class="sum-where">Camera ${ap.n} is the access point</div>` : '');
+      document.getElementById('wifiWhen').innerText =
+        !n ? 'waiting for data' : (shown == n - 1 ? 'latest' : `${(n - 1 - shown) * WIFI_MS / 1000} s ago`);
+
+      drawChart(document.getElementById('wifiChart'), wifiHist, {
+        series, slots: WIFI_LEN, offset: WIFI_LEN - n, lo: -95, hi: -25, fmt: v => v.toFixed(0),
+        xLabel: `last ${WIFI_LEN} samples, every ${WIFI_MS / 1000} s`, hover: wifiHover,
+        refs: [{v: -60, label: 'good'}, {v: -70, label: 'stutter'}],
+      });
+    }
+
+    const wifiChart = document.getElementById('wifiChart');
+    wifiChart.addEventListener('pointermove', e => {
+      wifiHover = chartIndex(wifiChart, e, WIFI_LEN, WIFI_LEN - wifiLen, wifiLen);
+      drawWifi();
+    });
+    wifiChart.addEventListener('pointerleave', () => { wifiHover = null; drawWifi(); });
+
+    /* ---------- FPS / Transfer / Gap charts ---------- */
+
+    // one line per shown camera (same color as in the Wifi chart), one value per
+    // second from the stream statistics, the last METRIC_LEN kept
+    const METRIC_LEN = 100;
+    const METRICS = {
+      fps:  {title: 'Frame rate', unit: 'fps', fmt: v => v.toFixed(1)},
+      xfer: {title: 'Transfer time per frame (first to last byte)', unit: 'ms', fmt: v => v.toFixed(0)},
+      gap:  {title: 'Longest pause between two frames', unit: 'ms', fmt: v => v.toFixed(0)},
+    };
+
+    function buildMetricBoxes() {
+      const container = document.getElementById('metricBoxes');
+      for (const m in METRICS) {
+        const M = METRICS[m];
+        Object.assign(M, {on: false, hist: {}, len: 0, hover: null});
+        const box = document.createElement('div');
+        box.className = 'metric-box';
+        box.style.display = 'none';
+        box.innerHTML =
+          `<div>${M.title} (${M.unit}) of every shown camera, every second, last ${METRIC_LEN} s</div>` +
+          `<canvas class="metric-chart" aria-label="${M.title} of every shown camera, last ${METRIC_LEN} seconds"></canvas>` +
+          `<div class="metric-legend"></div><div class="sum-where metric-when"></div>`;
+        container.appendChild(box);
+        M.box = box;
+        M.cv = box.querySelector('canvas');
+        M.cv.addEventListener('pointermove', e => {
+          M.hover = chartIndex(M.cv, e, METRIC_LEN, METRIC_LEN - M.len, M.len);
+          drawMetric(m);
+        });
+        M.cv.addEventListener('pointerleave', () => { M.hover = null; drawMetric(m); });
+      }
+    }
+    buildMetricBoxes();
+
+    function toggleMetric(m) {
+      const M = METRICS[m];
+      M.on = !M.on;
+      document.getElementById(m + 'Btn').classList.toggle('on', M.on);
+      M.box.style.display = M.on ? '' : 'none';
+      M.hist = {};
+      M.len = 0;
+      drawMetric(m);
+    }
+
+    // values: {fps: {cameraNumber: value, ...}, xfer: {...}, gap: {...}}
+    function metricSample(values) {
+      for (const m in METRICS) {
+        const M = METRICS[m];
+        if (!M.on) continue;
+        const v = values[m];
+        for (const cam in v) {
+          if (!M.hist[cam]) M.hist[cam] = new Array(M.len).fill(null);
+        }
+        for (const cam in M.hist) {
+          M.hist[cam].push(cam in v ? v[cam] : null);
+          if (M.hist[cam].length > METRIC_LEN) M.hist[cam].shift();
+          if (M.hist[cam].every(x => x == null)) delete M.hist[cam];
+        }
+        M.len = Math.min(M.len + 1, METRIC_LEN);
+        drawMetric(m);
+      }
+    }
+
+    function drawMetric(m) {
+      const M = METRICS[m];
+      const cams = Object.keys(M.hist).sort((a, b) => a - b);
+      const n = M.len;
+      const shown = (M.hover != null && M.hover < n) ? M.hover : n - 1;
+      M.box.querySelector('.metric-legend').innerHTML = cams.map(cam => {
+        const v = M.hist[cam][shown];
+        return `<span class="sum-key"><i style="background:${wifiColor('cam' + cam)}"></i>` +
+               `Camera ${cam} <b>${v == null ? '-' : M.fmt(v) + ' ' + M.unit}</b></span>`;
+      }).join('');
+      M.box.querySelector('.metric-when').innerText =
+        !n ? 'waiting for data' : (shown == n - 1 ? 'latest' : `${n - 1 - shown} s ago`);
+      drawChart(M.cv, M.hist, {
+        series: cams.map(cam => ({key: cam, color: wifiColor('cam' + cam)})),
+        slots: METRIC_LEN, offset: METRIC_LEN - n, fmt: M.fmt,
+        xLabel: `last ${METRIC_LEN} s`, hover: M.hover,
+      });
+    }
+
     // the cross can be moved and the images can change size at any time
     setInterval(() => {
-      if (sumOn || profileOn) {
+      if (sumOn || profileOn || focusOn) {
         showAnalysisInfo();
         placeOverlays();
       }
@@ -939,13 +1364,12 @@
       }
       showAuto();
 
-      document.getElementById('expSlider').value = exposure;
-      document.getElementById('expVal').innerText = exposure;
-
       const fs = document.getElementById('frameSlider');
       fs.max = maxFrame;
       fs.value = d.framesize;
-      document.getElementById('frameVal').innerText = d.framesize;
+      frameSize = d.framesize;
+      document.getElementById('frameVal').innerText = frameName(d.framesize);
+      showExposure();
 
       if (d.fps !== undefined) {
         const ps = document.getElementById('fpsSlider');
@@ -1022,9 +1446,21 @@
       sendSet('quality', current);
     }
 
+    // frame sizes of the camera library (index = framesize value)
+    const FRAME_SIZES = ['96x96', '160x120', '176x144', '240x176', '240x240', '320x240',
+                         '400x296', '480x320', '640x480', '800x600', '1024x768',
+                         '1280x720', '1280x1024', '1600x1200'];
+
+    function frameName(i) {
+      return FRAME_SIZES[i] || String(i);
+    }
+
+    // large sizes need much more WiFi: e.g. for focusing, then back to 320x240
     function setFrame(val) {
       val = Math.max(0, Math.min(maxFrame, parseInt(val)));
-      document.getElementById('frameVal').innerText = val;
+      document.getElementById('frameVal').innerText = frameName(val);
+      frameSize = val;
+      showExposure();          // another sensor mode may have another exposure range
       sendSet('framesize', val);
     }
 
@@ -1087,9 +1523,31 @@
       sendSet('agc_gain', val);
     }
 
+    // OV2640 sensor modes (measured with the Mean chart): the exposure counts sensor
+    // lines and is limited to one frame, so the slider ends at the lines per frame.
+    // upTo: largest frame size index of the mode, us: line time in microseconds
+    const EXPOSURE_MODES = [
+      {upTo: 6,  lines: 332,  us: 60.2},   // up to 400x296 (CIF), 50 fps
+      {upTo: 9,  lines: 686,  us: 58.3},   // 480x320 .. 800x600 (SVGA), 25 fps
+      {upTo: 99, lines: 1250, us: 64},     // larger (UXGA), 12.5 fps, estimated
+    ];
+    let frameSize = 5;
+
+    function showExposure() {
+      const mode = EXPOSURE_MODES.find(m => frameSize <= m.upTo);
+      const lines = Math.min(exposure, mode.lines);
+      const slider = document.getElementById('expSlider');
+      slider.max = mode.lines;
+      slider.value = lines;
+      document.getElementById('expVal').innerText =
+        `${exposure} (${(lines * mode.us / 1000).toFixed(1)} ms)` +
+        (exposure > mode.lines ? ', limited to one frame' : '');
+    }
+
     // Set manual exposure
     function setExposure(val) {
-      document.getElementById('expVal').innerText = val;
+      exposure = parseInt(val);
+      showExposure();
       sendSet('exposure', val);
     }
 
@@ -1146,11 +1604,17 @@
     }
 
     // show / hide quality, framesize and max fps
+    // closing it also switches its charts (Wifi, FPS, Transfer, Gap) off
     function toggleAdvanced() {
       const box = document.getElementById('advanced');
       const open = box.style.display == 'none';
       box.style.display = open ? '' : 'none';
+      document.getElementById('advCharts').style.display = open ? '' : 'none';
       document.getElementById('advBtn').classList.toggle('on', open);
+      if (!open) {
+        if (wifiOn) toggleWifi();
+        for (const m in METRICS) if (METRICS[m].on) toggleMetric(m);
+      }
     }
 
     // cameras come and go: keep the list current
@@ -1163,12 +1627,15 @@
     }, 5000);
 
     // WiFi signal (and max fps, which may be changed from another phone) of the
-    // shown cameras, often enough to follow a camera that is moved
+    // shown cameras, of all cameras while the Wifi chart is on; often enough to
+    // follow a camera that is moved
     setInterval(() => {
       if (document.hidden) return;
-      for (const ip of targets()) fetchCamStatus(ip);
+      const ips = wifiOn ? camList.map(cam => cam.ip) : targets();
+      for (const ip of ips) fetchCamStatus(ip);
       fetchApWifi();
-    }, 2000);
+      if (wifiOn) wifiSample();     // uses the answers of the previous round
+    }, WIFI_MS);
 
     showCamState();
     refreshCameraList().then(() => { showCamState(); renderLeds(); });

@@ -157,10 +157,16 @@ uint32_t yPosition = 200;
 
 #define STREAM_PORT 81
 #define MAX_STREAM_CLIENTS 4       // simultaneous /stream viewers (phone, python, ...)
-#define MAX_FRAMESIZE 5            // largest allowed framesize_t index (5 = FRAMESIZE_QVGA, 320x240)
+// camera clock; the test environment "xclk10" in platformio.ini builds with 10 MHz
+// for a board whose image data gets corrupted at full speed (colored bands)
+#ifndef XCLK_MHZ
+#define XCLK_MHZ 20
+#endif
+#define MAX_FRAMESIZE FRAMESIZE_UXGA   // largest allowed frame size (1600x1200, the OV2640 maximum), e.g. for focusing
+#define DEFAULT_FRAMESIZE FRAMESIZE_QVGA   // frame size after start (320x240), light on the WiFi
 #define DEFAULT_QUALITY 10         // jpeg quality 1 (best) - 63 (worst)
 #define DEFAULT_MAX_FPS 12         // frames per second sent to every viewer, limits the WiFi load
-#define MAX_FPS_LIMIT 30
+#define MAX_FPS_LIMIT 50           // the OV2640 delivers at most ~50 fps (up to 400x296, 20 MHz clock)
 
 static volatile int maxFps = DEFAULT_MAX_FPS;
 
@@ -265,6 +271,26 @@ static void setManualWb(sensor_t *s, int r, int g, int b)
   printWbRegs(s, "manual");
 }
 
+// manual exposure in sensor lines (about 60 us each). The sensor limits it to
+// about one frame: measured 332 lines up to 400x296, 686 up to 800x600, and
+// about 1250 (estimated) above. set_aec_value() of the camera library stops at
+// 1200, so on the OV2640 the exposure registers are written directly:
+// sensor bank REG45[5:0] = bits 15..10, AEC = bits 9..2, REG04[1:0] = bits 1..0
+#define MAX_EXPOSURE_LINES 1250
+
+static void setExposureLines(sensor_t *s, int lines)
+{
+  lines = constrain(lines, 0, MAX_EXPOSURE_LINES);
+  if (s->id.PID != OV2640_PID) {
+    s->set_aec_value(s, lines);
+    return;
+  }
+  s->set_reg(s, 0x145, 0x3F, (lines >> 10) & 0x3F);
+  s->set_reg(s, 0x110, 0xFF, (lines >> 2) & 0xFF);
+  s->set_reg(s, 0x104, 0x03, lines & 0x03);
+  s->status.aec_value = lines;
+}
+
 void setAllAuto(int enable)
 {
     allAuto = enable;
@@ -298,7 +324,7 @@ void setAllAuto(int enable)
 
     // When going manual: freeze current values
     if (!en) {
-        s->set_aec_value(s, s->status.aec_value);
+        setExposureLines(s, s->status.aec_value);
         s->set_agc_gain(s, s->status.agc_gain);
     }
 
@@ -409,9 +435,7 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         }
         else if (strcmp(param, "exposure") == 0) {
             if (s->status.aec == 0) { // only if AE disabled
-                if (value < 0) value = 0;
-                if (value > 1200) value = 1200;
-                s->set_aec_value(s, value);
+                setExposureLines(s, value);
             }
         }
         else if (strcmp(param, "gain") == 0) {
@@ -971,7 +995,7 @@ void setCamDefault()
   s->set_contrast(s, 0);        // optional: increase darkness of shadows
   s->set_saturation(s,0);
   s->set_quality(s, DEFAULT_QUALITY);
-  s->set_framesize(s, (framesize_t)MAX_FRAMESIZE);
+  s->set_framesize(s, DEFAULT_FRAMESIZE);
   // AEC2 ("AEC DSP") off: on the OV3660 it is the night mode, which lowers the
   // frame rate in low light; the normal auto exposure works without it
   s->set_aec2(s, 0);
@@ -1018,10 +1042,11 @@ void setup() {
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
-  // init with VGA so the frame buffers are large enough for any quality,
-  // the working framesize (MAX_FRAMESIZE) is set afterwards in setCamDefault()
-  config.frame_size = FRAMESIZE_VGA;
+  config.xclk_freq_hz = XCLK_MHZ * 1000000;
+  // init with the largest frame size: the frame buffers (in PSRAM) are sized for it,
+  // so every size up to MAX_FRAMESIZE can be chosen later; the working size
+  // (DEFAULT_FRAMESIZE) is set afterwards in setCamDefault()
+  config.frame_size = MAX_FRAMESIZE;
 
 
   config.pixel_format = PIXFORMAT_JPEG; // for streaming

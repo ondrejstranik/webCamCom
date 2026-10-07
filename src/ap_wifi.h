@@ -6,7 +6,7 @@
   the access point receives every connected device (cameras, LED board, phones,
   computers), and the one of the device that asks ("you"), so the web page can
   show the link of the phone / computer it runs on.
-  {"ap":1,"you":-55,"stations":[{"ip":"192.168.4.2","rssi":-61},...]}
+  {"ap":1,"stations":[{"ip":"192.168.4.2","rssi":-61},...],"you":-55,"you_ip":"192.168.4.3"}
 
   Used by webCamCom (cameras) and ledCom (LED board), only on the access point.
  *********/
@@ -69,7 +69,9 @@ static esp_err_t apWifiHandler(httpd_req_t *req)
                      first ? "" : ",", b[0], b[1], b[2], b[3], rssi);
     first = false;
   }
-  if (used < sizeof(json)) snprintf(json + used, sizeof(json) - used, "],\"you\":%d}", you);
+  const uint8_t *p = (const uint8_t *)&peer;
+  if (used < sizeof(json)) snprintf(json + used, sizeof(json) - used, "],\"you\":%d,\"you_ip\":\"%u.%u.%u.%u\"}",
+                                    you, p[0], p[1], p[2], p[3]);
   return httpd_resp_sendstr(req, json);
 }
 
