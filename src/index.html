@@ -1,6 +1,7 @@
 <!DOCTYPE html>
   <html>
   <head>
+      <meta charset="utf-8">
       <title>ESP32 Web BLE App</title>
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <link rel="icon" type="image/jpeg" href="">
@@ -95,6 +96,37 @@
     border: 2px dashed #ff00ff;
     border-radius: 50%;
     pointer-events: none;   /* clicks go to the cross below */
+  }
+  /* slider with − and + buttons (added by addStepButtons) */
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    max-width: 400px;
+  }
+  .slider-row input[type=range] {
+    flex: 1;
+    min-width: 0;
+  }
+  .slider-row .step-btn {      /* stronger than .led-panel button */
+    width: 36px;
+    margin: 0;
+    padding: 0;
+    height: 36px;
+    flex: none;
+    border: 2px solid #06c;
+    border-radius: 6px;
+    background: #fff;
+    color: #06c;
+    font-size: 20px;
+    line-height: 1;
+    touch-action: manipulation;   /* no double-tap zoom while stepping on a phone */
+    user-select: none;
+  }
+  .slider-row .step-btn:active {
+    background: #06c;
+    color: #fff;
   }
   /* LED controls: centered like the camera images, at the top of the page */
   #leds {
@@ -209,8 +241,8 @@
         </div>
     </div>
     <div style="margin:20px;">
-        <!-- AUTO on: exposure, gain and white balance automatic; off: set by hand below -->
-        <button id="autoBtn" class="toggle" onclick="toggleAuto()">AUTO: ...</button>
+        <!-- Auto exposure on: exposure, gain and white balance automatic; off: set by hand below -->
+        <button id="autoBtn" class="toggle" onclick="toggleAuto()">Auto exposure: ...</button>
         <div id="manual" style="display:none;">
           Exposure: <span id="expVal">...</span><br>
           <input type="range" id="expSlider" min="0" max="332" value="0" oninput="setExposure(this.value)"><br>
@@ -229,24 +261,43 @@
     <button id="sumBtn" class="toggle" onclick="toggleSum()">Mean</button>
     <button id="profileBtn" class="toggle" onclick="toggleProfile()">Profile</button>
     <button id="focusBtn" class="toggle" onclick="toggleFocus()">Focus</button>
-    <button id="advBtn" class="toggle" onclick="toggleAdvanced()">Advanced</button>
-    <!-- charts of the connection, only while Advanced is on -->
-    <div id="advCharts" style="display:none;">
-      <button id="wifiBtn" class="toggle" onclick="toggleWifi()">Wifi</button>
-      <button id="fpsBtn" class="toggle" onclick="toggleMetric('fps')">FPS</button>
-      <button id="xferBtn" class="toggle" onclick="toggleMetric('xfer')">Transfer</button>
-      <button id="gapBtn" class="toggle" onclick="toggleMetric('gap')">Gap</button>
+    <div>
+      <button id="advBtn" class="toggle" onclick="toggleAdvanced()">Advanced</button>
+      <!-- charts of the connection, only while Advanced is on -->
+      <span id="advCharts" style="display:none;">
+        <button id="wifiBtn" class="toggle" onclick="toggleWifi()">Wifi</button>
+        <button id="fpsBtn" class="toggle" onclick="toggleMetric('fps')">FPS</button>
+        <button id="xferBtn" class="toggle" onclick="toggleMetric('xfer')">Transfer</button>
+        <button id="gapBtn" class="toggle" onclick="toggleMetric('gap')">Gap</button>
+      </span>
     </div>
     <div id="advanced" style="display:none;">
       <p>Stream: <span id='fpsval'>...</span></p>
-      <div style="display:flex; align-items:center; gap:10px;">
-        <button onclick='changeQuality(-5)' style='padding:10px;margin:5px;'>Increase Quality</button>
-        <span id='qval'> JPEG Quality: ... </span>
-        <button onclick='changeQuality(5)' style='padding:10px;margin:5px;'>Decrease Quality</button>
+      <div style="margin:20px;">
+          JPEG quality: <span id="qval">...</span> (lower = better image, larger frames)<br>
+          <input type="range" id="qualitySlider" min="10" max="63" value="10" oninput="setQuality(this.value)">
       </div>
       <div style="margin:20px;">
-          FrameSize: <span id="frameVal">...</span><br>
-          <input type="range" id="frameSlider" min="0" max="5" value="5" oninput="setFrame(this.value)">
+          <!-- frame size = pixel skipping of the sensor (readout mode) + scaling of the image processor -->
+          Pixel skipping:
+          <span id="modeBtns">
+            <button class="toggle" data-mode="0" onclick="setSensorMode(0)">1:1</button>
+            <button class="toggle" data-mode="1" onclick="setSensorMode(1)">1:2</button>
+            <button class="toggle" data-mode="2" onclick="setSensorMode(2)">1:4</button>
+          </span><br>
+          Scaling: <span id="frameVal">...</span><br>
+          <input type="range" id="frameSlider" min="0" max="0" value="0" oninput="setFrameStep(this.value)">
+      </div>
+      <div style="margin:20px;">
+          <!-- digital zoom around the green cross, the view can be moved when zoomed -->
+          Zoom: <span id="zoomVal">1.0x</span><br>
+          <input type="range" id="zoomSlider" min="1" max="4" step="1" value="1" oninput="setZoom(this.value)">
+          <div id="panBox" style="display:none;">
+            Move left / right: <span id="panXVal">50</span> %<br>
+            <input type="range" id="panXSlider" min="0" max="100" value="50" oninput="setPan('x', this.value)"><br>
+            Move up / down: <span id="panYVal">50</span> %<br>
+            <input type="range" id="panYSlider" min="0" max="100" value="50" oninput="setPan('y', this.value)">
+          </div>
       </div>
       <div style="margin:20px;">
           Max FPS: <span id="fpsLimitVal">...</span><br>
@@ -362,25 +413,71 @@
     // page is scrolled; grab keeps the point of the cross where it was pressed
     let grab = null;
 
+    // While zoomed, dragging the cross beyond the edge of its camera image moves
+    // the view in that direction: the cross stays on the edge, and the further the
+    // pointer is outside, the faster the view moves (PAN_SPEED window widths per
+    // second at one image width outside)
+    const PAN_SPEED = 5;
+    let dragImg = null;       // camera image the cross is dragged on
+    let panVel = {x: 0, y: 0};
+    let panTimer = null;
+
     function startDrag(e) {
       grab = {
         x: e.pageX - (parseFloat(cnvs.style.left) || 0),
         y: e.pageY - (parseFloat(cnvs.style.top) || 0),
       };
       moving = true;
+      dragImg = crossTarget();
       cnvs.setPointerCapture(e.pointerId);
       e.preventDefault();
     }
 
     function drag(e) {
       if (!moving) return;
-      cnvs.style.left = (e.pageX - grab.x) + "px";
-      cnvs.style.top = (e.pageY - grab.y) + "px";
+      let left = e.pageX - grab.x;
+      let top = e.pageY - grab.y;
+      panVel = {x: 0, y: 0};
+      if (!dragImg) dragImg = crossTarget();
+      if (dragImg && zoom.z > 1) {
+        // image edges and cross center in page coordinates
+        const r = dragImg.getBoundingClientRect();
+        const x0 = r.left + window.scrollX, x1 = x0 + r.width - 1;
+        const y0 = r.top + window.scrollY, y1 = y0 + r.height - 1;
+        const half = cnvs.offsetWidth / 2;
+        const cx = left + half, cy = top + half;
+        const over = (v, lo, hi) => v < lo ? v - lo : (v > hi ? v - hi : 0);
+        const ox = over(cx, x0, x1), oy = over(cy, y0, y1);
+        // outside: keep the cross on the edge and move the view instead
+        panVel = {x: Math.max(-1, Math.min(1, ox / r.width)), y: Math.max(-1, Math.min(1, oy / r.height))};
+        left -= ox;
+        top -= oy;
+      }
+      cnvs.style.left = left + "px";
+      cnvs.style.top = top + "px";
       placeOverlays();    // measuring circle and profile line follow the cross
+
+      if ((panVel.x || panVel.y) && !panTimer) panTimer = setInterval(panStep, 100);
+      if (!panVel.x && !panVel.y) stopPan();
+    }
+
+    // one step of moving the view, 10 times per second while the cross is held outside
+    function panStep() {
+      if (!moving || (!panVel.x && !panVel.y) || zoom.z <= 1) { stopPan(); return; }
+      zoom.cx += panVel.x * PAN_SPEED / 10 / zoom.z;
+      zoom.cy += panVel.y * PAN_SPEED / 10 / zoom.z;
+      sendZoom();
+    }
+
+    function stopPan() {
+      clearInterval(panTimer);
+      panTimer = null;
     }
 
     function endDrag(e) {
       moving = false;
+      stopPan();
+      dragImg = null;
       if (cnvs.hasPointerCapture(e.pointerId)) cnvs.releasePointerCapture(e.pointerId);
     }
 
@@ -1354,6 +1451,7 @@
       if (d.maxFramesize !== undefined) maxFrame = d.maxFramesize;
 
       document.getElementById('qval').innerText = current;
+      document.getElementById('qualitySlider').value = current;
       if (d.agc_gain !== undefined) {
         document.getElementById('gainSlider').value = d.agc_gain;
         document.getElementById('gainVal').innerText = d.agc_gain;
@@ -1364,11 +1462,16 @@
       }
       showAuto();
 
-      const fs = document.getElementById('frameSlider');
-      fs.max = maxFrame;
-      fs.value = d.framesize;
       frameSize = d.framesize;
-      document.getElementById('frameVal').innerText = frameName(d.framesize);
+      if (d.zoom !== undefined) {
+        zoom = {z: d.zoom / 10, cx: d.zx / 1000, cy: d.zy / 1000};
+        zoomMax = d.zoomMax / 10;
+        zoomOut = d.outW ? [d.outW, d.outH] : null;
+        sensorModeNow = d.sensorMode;
+        clampZoomCenter();
+        showZoom();
+      }
+      showFrameSize();
       showExposure();
 
       if (d.fps !== undefined) {
@@ -1431,6 +1534,7 @@
         for (const b of panel.querySelectorAll('button')) {
           b.onclick = () => queueSet(led.ip, 'led', 'color', b.dataset.color, show);
         }
+        addStepButtons(panel);     // after the color buttons got their handler
         fetch(`http://${led.ip}/led`, {mode: "cors"})
           .then(r => r.json())
           .then(show)
@@ -1438,10 +1542,41 @@
       }
     }
 
-    function changeQuality(delta) {
-      current += delta;
-      if(current < 10) current = 10;
-      if(current > 63) current = 63;
+    // − and + buttons next to every slider in root: one step per press, holding
+    // repeats; the slider then reacts as if moved by hand (its input event)
+    function addStepButtons(root) {
+      for (const slider of root.querySelectorAll('input[type=range]')) {
+        if (slider.dataset.stepButtons) continue;
+        slider.dataset.stepButtons = '1';
+        const row = document.createElement('span');
+        row.className = 'slider-row';
+        slider.replaceWith(row);
+        const button = (text, dir) => {
+          const b = document.createElement('button');
+          b.className = 'step-btn';
+          b.type = 'button';
+          b.innerText = text;
+          let timer = null;
+          const step = () => {
+            if (dir > 0) slider.stepUp(); else slider.stepDown();
+            slider.dispatchEvent(new Event('input', {bubbles: true}));
+          };
+          const stop = () => { clearTimeout(timer); clearInterval(timer); timer = null; };
+          b.addEventListener('pointerdown', e => {
+            e.preventDefault();
+            step();
+            timer = setTimeout(() => { timer = setInterval(step, 60); }, 400);
+          });
+          for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(ev, stop);
+          return b;
+        };
+        row.append(button('−', -1), slider, button('+', 1));
+      }
+    }
+
+    // JPEG quality 10 (best, largest frames) .. 63
+    function setQuality(val) {
+      current = parseInt(val);
       document.getElementById('qval').innerText = current;
       sendSet('quality', current);
     }
@@ -1451,17 +1586,157 @@
                          '400x296', '480x320', '640x480', '800x600', '1024x768',
                          '1280x720', '1280x1024', '1600x1200'];
 
+    // OV2640 readout modes: the sensor reads every pixel, every 2nd or every 4th
+    // (readW = width of the readout), the image processor scales that to one of
+    // the frame sizes of the mode (sizes: frame size indexes, smallest first)
+    // Only the 4:3 sizes, which show the full sensor area (the others are cropped).
+    const SENSOR_MODES = [
+      {readW: 1600, sizes: [10, 13]},     // 1:1: 1024x768, 1600x1200
+      {readW: 800,  sizes: [8, 9]},       // 1:2: 640x480, 800x600
+      {readW: 400,  sizes: [1, 5, 6]}     // 1:4: 160x120, 320x240, 400x296
+    ];
+    const ALL_MODE_SIZES = [[10, 11, 12, 13], [7, 8, 9], [0, 1, 2, 3, 4, 5, 6]];
+
     function frameName(i) {
       return FRAME_SIZES[i] || String(i);
+    }
+
+    // also for a cropped size the camera may still have from before
+    function sensorModeOf(fs) {
+      return Math.max(0, ALL_MODE_SIZES.findIndex(sizes => sizes.includes(fs)));
+    }
+
+    function frameScale(fs) {
+      return parseInt(frameName(fs)) / SENSOR_MODES[sensorModeOf(fs)].readW;
+    }
+
+    // not 4:3: a part of the sensor area is cut off
+    function frameCropped(fs) {
+      const [w, h] = frameName(fs).split('x').map(Number);
+      return Math.abs(w / h - 4 / 3) > 0.03;
+    }
+
+    // mode buttons, scale slider (steps = frame sizes of the mode) and final size
+    function showFrameSize() {
+      const m = sensorModeOf(frameSize);
+      for (const b of document.querySelectorAll('#modeBtns button')) {
+        const mode = SENSOR_MODES[b.dataset.mode];
+        b.classList.toggle('on', b.dataset.mode == m);
+        b.disabled = mode.sizes[0] > maxFrame;          // not allowed by the camera
+      }
+      const sizes = SENSOR_MODES[m].sizes.filter(fs => fs <= maxFrame);
+      const slider = document.getElementById('frameSlider');
+      slider.max = sizes.length - 1;
+      slider.value = Math.max(0, sizes.indexOf(frameSize));
+      document.getElementById('frameVal').innerText =
+        `${frameScale(frameSize).toFixed(2)} (${frameName(frameSize)})`;
+    }
+
+    // another mode: the frame size of that mode with the scale closest to the
+    // current one, preferring sizes that show the full sensor area (4:3)
+    function setSensorMode(m) {
+      const scale = frameScale(frameSize);
+      const sizes = SENSOR_MODES[m].sizes.filter(fs => fs <= maxFrame);
+      if (!sizes.length) return;
+      const score = fs => Math.abs(frameScale(fs) - scale) + (frameCropped(fs) ? 0.2 : 0);
+      let best = sizes[0];
+      for (const fs of sizes) {
+        if (score(fs) < score(best)) best = fs;
+      }
+      setFrame(best);
+    }
+
+    function setFrameStep(i) {
+      const sizes = SENSOR_MODES[sensorModeOf(frameSize)].sizes.filter(fs => fs <= maxFrame);
+      setFrame(sizes[parseInt(i)]);
     }
 
     // large sizes need much more WiFi: e.g. for focusing, then back to 320x240
     function setFrame(val) {
       val = Math.max(0, Math.min(maxFrame, parseInt(val)));
-      document.getElementById('frameVal').innerText = frameName(val);
       frameSize = val;
+      // the possible zoom depends on the frame width (the camera answers the exact value)
+      zoomMax = zoomMaxFor(val);
+      if (zoom.z > zoomMax) zoom.z = zoomMax;
+      zoomOut = null;
+      sensorModeNow = null;
+      showFrameSize();
+      showZoom();
       showExposure();          // another sensor mode may have another exposure range
       sendSet('framesize', val);
+    }
+
+    // digital zoom = crop: 1/z of the field of view at the chosen pixel skipping and
+    // scaling, so the frame gets 1/z of the frame size (e.g. 1600x1200, zoom 4 -> 400x300).
+    // cx / cy = center of the shown window as a fraction of the sensor width / height
+    let zoom = {z: 1, cx: 0.5, cy: 0.5};
+    const ZOOM_MAX = 4;        // largest zoom
+    let zoomMax = ZOOM_MAX;    // lower for small frames: the frame stays at least 64 pixels wide
+    let zoomOut = null;        // frame size the camera sends while zoomed [w, h]
+    let sensorModeNow = null;  // readout mode the camera reports (0 = 1:4, 1 = 1:2, 2 = 1:1)
+
+    // whole zoom steps only
+    function zoomMaxFor(fs) {
+      return Math.max(1, Math.min(ZOOM_MAX, Math.floor(parseInt(frameName(fs)) / 64)));
+    }
+
+    // keep the window inside the sensor area
+    function clampZoomCenter() {
+      const half = 0.5 / zoom.z;
+      zoom.cx = Math.min(Math.max(zoom.cx, half), 1 - half);
+      zoom.cy = Math.min(Math.max(zoom.cy, half), 1 - half);
+    }
+
+    function showZoom() {
+      const slider = document.getElementById('zoomSlider');
+      slider.max = zoomMax;
+      slider.value = zoom.z;
+      // frame size while zoomed: from the camera, else estimated like the camera does
+      const [fw, fh] = frameName(frameSize).split('x').map(Number);
+      const out = zoomOut || [Math.max(8, Math.floor(fw / zoom.z / 8) * 8), Math.max(8, Math.floor(fh / zoom.z / 8) * 8)];
+      document.getElementById('zoomVal').innerText = zoom.z.toFixed(0) + 'x' +
+        (zoom.z > 1 ? ` = ${out[0]}x${out[1]}, field of view ${(100 / zoom.z).toFixed(0)} %` : '') +
+        (zoomMax < ZOOM_MAX ? ` (up to ${zoomMax.toFixed(0)}x)` : '');
+      document.getElementById('panBox').style.display = zoom.z > 1 ? '' : 'none';
+      const px = Math.round(zoom.cx * 100), py = Math.round(zoom.cy * 100);
+      document.getElementById('panXSlider').value = px;
+      document.getElementById('panXVal').innerText = px;
+      document.getElementById('panYSlider').value = py;
+      document.getElementById('panYVal').innerText = py;
+    }
+
+    function sendZoom() {
+      clampZoomCenter();
+      zoomOut = null;            // until the camera answers
+      showZoom();
+      sensorModeNow = null;      // the camera may switch the readout mode, its answer tells
+      showExposure();
+      sendSet('zoom', `${Math.round(zoom.z * 10)},${Math.round(zoom.cx * 1000)},${Math.round(zoom.cy * 1000)}`);
+    }
+
+    // zoom so that the image point under the green cross stays under the cross
+    // (around the image center when the cross is not on a camera image)
+    function setZoom(val) {
+      const z = Math.min(Math.round(parseFloat(val)), zoomMax);
+      const el = crossTarget();
+      if (el) {
+        const r = el.getBoundingClientRect();
+        const c = cnvs.getBoundingClientRect();
+        const rx = (c.left + c.width / 2 - r.left) / r.width - 0.5;   // -0.5 .. 0.5 across the image
+        const ry = (c.top + c.height / 2 - r.top) / r.height - 0.5;
+        const px = zoom.cx + rx / zoom.z, py = zoom.cy + ry / zoom.z; // point under the cross, on the sensor
+        zoom.cx = px - rx / z;
+        zoom.cy = py - ry / z;
+      }
+      zoom.z = z;
+      sendZoom();
+    }
+
+    // move the zoomed view: center 0 .. 100 % of the sensor width / height
+    function setPan(axis, val) {
+      if (axis == 'x') zoom.cx = parseInt(val) / 100;
+      else zoom.cy = parseInt(val) / 100;
+      sendZoom();
     }
 
     // frames per second each camera sends, lower = less WiFi load
@@ -1481,7 +1756,7 @@
 
     function showAuto() {
       const b = document.getElementById('autoBtn');
-      b.innerText = "AUTO: " + (allAuto ? "ON" : "OFF");
+      b.innerText = "Auto exposure: " + (allAuto ? "ON" : "OFF");
       b.classList.toggle('on', !!allAuto);
       document.getElementById('manual').style.display = allAuto ? 'none' : '';
       showWb();
@@ -1533,8 +1808,11 @@
     ];
     let frameSize = 5;
 
+    // the readout mode the camera reports (it changes with the zoom), else from the frame size;
+    // EXPOSURE_MODES is in the same order as the camera's numbers (0 = 1:4, 1 = 1:2, 2 = 1:1)
     function showExposure() {
-      const mode = EXPOSURE_MODES.find(m => frameSize <= m.upTo);
+      const mode = sensorModeNow != null ? EXPOSURE_MODES[sensorModeNow]
+                                         : EXPOSURE_MODES.find(m => frameSize <= m.upTo);
       const lines = Math.min(exposure, mode.lines);
       const slider = document.getElementById('expSlider');
       slider.max = mode.lines;
@@ -1637,6 +1915,8 @@
       if (wifiOn) wifiSample();     // uses the answers of the previous round
     }, WIFI_MS);
 
+    addStepButtons(document);
+    showFrameSize();
     showCamState();
     refreshCameraList().then(() => { showCamState(); renderLeds(); });
 

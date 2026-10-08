@@ -278,6 +278,69 @@ static void setManualWb(sensor_t *s, int r, int g, int b)
 // sensor bank REG45[5:0] = bits 15..10, AEC = bits 9..2, REG04[1:0] = bits 1..0
 #define MAX_EXPOSURE_LINES 1250
 
+// digital zoom = crop: the image processor uses only 1/zoom of the sensor area
+// (width and height) and the frame gets 1/zoom of the chosen frame size, so the
+// readout mode (pixel skipping) and the scaling stay as chosen; e.g. 1600x1200
+// with zoom 4 gives a 400x300 frame of a quarter of the field of view.
+// The frame stays at least ZOOM_MIN_W pixels wide.
+// OV2640: set_res_raw(driverMode, -, -, -, offsetX, offsetY, windowW, windowH, outW, outH)
+// sets this window, in pixels of the readout mode (driverMode 0 = UXGA, 1 = SVGA, 2 = CIF)
+#define ZOOM_MIN_W 64
+#define ZOOM_MAX_X10 40         // largest zoom 4x
+static const int MODE_W[3] = {400, 800, 1600};   // readout mode 0 = 1:4 (CIF), 1 = 1:2 (SVGA), 2 = 1:1 (UXGA)
+static const int MODE_H[3] = {296, 600, 1200};
+static int zoomX10 = 10;            // requested zoom x10, 10 (none) .. ZOOM_MAX_X10
+static int zoomEffX10 = 10;         // zoom in use, may be lower for small frames
+static int zoomCx = 500;            // window center, per mille of the sensor width
+static int zoomCy = 500;            // ... and height
+static int zoomOutW = 0, zoomOutH = 0;   // frame size while zoomed
+static int sensorMode = 0;          // readout mode in use
+
+static int frameMode(framesize_t fs)
+{
+  return fs <= FRAMESIZE_CIF ? 0 : (fs <= FRAMESIZE_SVGA ? 1 : 2);
+}
+
+// largest zoom x10 for a frame size, whole zoom steps only
+static int zoomMaxX10(framesize_t fs)
+{
+  return constrain((int)resolution[fs].width / ZOOM_MIN_W * 10, 10, ZOOM_MAX_X10);
+}
+
+// set the window for the current frame size; call after every frame size change
+static void applyZoom(sensor_t *s)
+{
+  framesize_t fs = s->status.framesize;
+  int w = resolution[fs].width, h = resolution[fs].height;
+  int m = frameMode(fs);
+  int z = min(zoomX10, zoomMaxX10(fs));
+  sensorMode = m;
+
+  if (z <= 10 || s->id.PID != OV2640_PID) {
+    if (zoomEffX10 != 10) s->set_framesize(s, fs);   // full view again
+    zoomEffX10 = 10;
+    zoomOutW = w;
+    zoomOutH = h;
+    return;
+  }
+
+  // the window: 1/zoom of the readout area; the frame: 1/zoom of the frame size
+  // (multiples of 8, the image processor and the JPEG encoder need that)
+  int winW = (MODE_W[m] * 10 / z) & ~7;
+  int winH = (MODE_H[m] * 10 / z) & ~7;
+  int outW = max((w * 10 / z) & ~7, 8);
+  int outH = max((h * 10 / z) & ~7, 8);
+  outW = min(outW, winW);
+  outH = min(outH, winH);
+  int offX = constrain(zoomCx * MODE_W[m] / 1000 - winW / 2, 0, MODE_W[m] - winW);
+  int offY = constrain(zoomCy * MODE_H[m] / 1000 - winH / 2, 0, MODE_H[m] - winH);
+  // the driver numbers its modes the other way round: 0 = UXGA, 1 = SVGA, 2 = CIF
+  s->set_res_raw(s, 2 - m, 0, 0, 0, offX, offY, winW, winH, outW, outH, false, false);
+  zoomEffX10 = z;
+  zoomOutW = outW;
+  zoomOutH = outH;
+}
+
 static void setExposureLines(sensor_t *s, int lines)
 {
   lines = constrain(lines, 0, MAX_EXPOSURE_LINES);
@@ -463,6 +526,17 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
           if (value > MAX_FRAMESIZE) value = MAX_FRAMESIZE;
           if (value != s->status.framesize) {
               s->set_framesize(s, (framesize_t)value);
+              sensorMode = frameMode((framesize_t)value);
+              if (zoomX10 > 10) applyZoom(s);       // keep the zoom
+          }
+        }
+        else if (strcmp(param, "zoom") == 0) {         // "zoomX10,centerX,centerY" (center per mille)
+          int z, cx, cy;
+          if (sscanf(value_str, "%d,%d,%d", &z, &cx, &cy) == 3) {
+            zoomX10 = constrain((z + 5) / 10 * 10, 10, ZOOM_MAX_X10);   // whole zoom steps only
+            zoomCx = constrain(cx, 0, 1000);
+            zoomCy = constrain(cy, 0, 1000);
+            applyZoom(s);
           }
         }
         else if (strcmp(param, "allAuto") == 0) {
@@ -524,21 +598,29 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
     int saturation   = s->status.saturation;
     int framesize    = s->status.framesize;
 
-    char json[400];
+    char json[640];
     snprintf(json, sizeof(json),
         "{\"quality\":%d,\"exposure\":%d,\"auto_exposure\":%d,"
         "\"gain\":%d,\"brightness\":%d,\"contrast\":%d,"
         "\"saturation\":%d,\"framesize\":%d,\"maxFramesize\":%d,"
         "\"allAuto\":%d,\"agc\":%d,\"agc_gain\":%d,\"awb\":%d,\"wb_mode\":%d,"
         "\"wb_r\":%d,\"wb_g\":%d,\"wb_b\":%d,\"number\":%d,\"streamClients\":%d,"
-        "\"fps\":%d,\"maxFpsLimit\":%d,\"sensor\":\"%s\",\"ap\":%d,\"rssi\":%d}",
+        "\"fps\":%d,\"maxFpsLimit\":%d,\"sensor\":\"%s\",\"ap\":%d,\"rssi\":%d,"
+        "\"zoom\":%d,\"zoomMax\":%d,\"zx\":%d,\"zy\":%d,\"sensorMode\":%d,"
+        "\"outW\":%d,\"outH\":%d}",
         quality, exposure, auto_exp,
         gain, brightness, contrast, saturation, framesize, MAX_FRAMESIZE,
         allAuto, s->status.agc, s->status.agc_gain, s->status.awb, s->status.wb_mode,
         wbR, wbG, wbB, camNumber, streamClients.load(),
         maxFps, MAX_FPS_LIMIT, sensorName,
         // WiFi signal of a station camera to the access point in dBm (0 = access point / not connected)
-        access_point, (access_point == 0 && WiFi.status() == WL_CONNECTED) ? (int)WiFi.RSSI() : 0
+        access_point, (access_point == 0 && WiFi.status() == WL_CONNECTED) ? (int)WiFi.RSSI() : 0,
+        // zoom in use and the largest possible for this frame size (both x10), window
+        // center, readout mode, frame size actually sent (smaller while zoomed)
+        zoomEffX10, zoomMaxX10(s->status.framesize),
+        zoomCx, zoomCy, sensorMode,
+        zoomEffX10 > 10 ? zoomOutW : (int)resolution[s->status.framesize].width,
+        zoomEffX10 > 10 ? zoomOutH : (int)resolution[s->status.framesize].height
     );
 
     httpd_resp_set_type(req, "application/json");
