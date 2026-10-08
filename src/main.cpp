@@ -146,6 +146,10 @@ static void devicesJson(DeviceList &list, char *out, size_t size, const char *se
 int timing = 0;
 int allAuto = 1;   // 1 = automatic control ON, 0 = manual
 
+// changes with every start of the camera: the page then puts the camera's cross
+// back to the middle of the sensor
+static uint32_t bootId = 0;
+
 uint32_t delayValue = 1500;
 uint32_t xPosition = 100;
 uint32_t yPosition = 200;
@@ -163,7 +167,9 @@ uint32_t yPosition = 200;
 #define XCLK_MHZ 20
 #endif
 #define MAX_FRAMESIZE FRAMESIZE_UXGA   // largest allowed frame size (1600x1200, the OV2640 maximum), e.g. for focusing
-#define DEFAULT_FRAMESIZE FRAMESIZE_QVGA   // frame size after start (320x240), light on the WiFi
+// after start every camera is at "Set 1x" of the page: auto exposure on, pixel
+// skipping 1:4 with scaling 1 (400x296), zoom 1, JPEG quality 10, max fps 12
+#define DEFAULT_FRAMESIZE FRAMESIZE_CIF    // frame size after start (400x296), light on the WiFi
 #define DEFAULT_QUALITY 10         // jpeg quality 1 (best) - 63 (worst)
 #define DEFAULT_MAX_FPS 12         // frames per second sent to every viewer, limits the WiFi load
 #define MAX_FPS_LIMIT 50           // the OV2640 delivers at most ~50 fps (up to 400x296, 20 MHz clock)
@@ -286,7 +292,7 @@ static void setManualWb(sensor_t *s, int r, int g, int b)
 // OV2640: set_res_raw(driverMode, -, -, -, offsetX, offsetY, windowW, windowH, outW, outH)
 // sets this window, in pixels of the readout mode (driverMode 0 = UXGA, 1 = SVGA, 2 = CIF)
 #define ZOOM_MIN_W 64
-#define ZOOM_MAX_X10 40         // largest zoom 4x
+#define ZOOM_MAX_X10 100        // largest zoom 10x
 static const int MODE_W[3] = {400, 800, 1600};   // readout mode 0 = 1:4 (CIF), 1 = 1:2 (SVGA), 2 = 1:1 (UXGA)
 static const int MODE_H[3] = {296, 600, 1200};
 static int zoomX10 = 10;            // requested zoom x10, 10 (none) .. ZOOM_MAX_X10
@@ -607,7 +613,7 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         "\"wb_r\":%d,\"wb_g\":%d,\"wb_b\":%d,\"number\":%d,\"streamClients\":%d,"
         "\"fps\":%d,\"maxFpsLimit\":%d,\"sensor\":\"%s\",\"ap\":%d,\"rssi\":%d,"
         "\"zoom\":%d,\"zoomMax\":%d,\"zx\":%d,\"zy\":%d,\"sensorMode\":%d,"
-        "\"outW\":%d,\"outH\":%d}",
+        "\"outW\":%d,\"outH\":%d,\"boot\":%u}",
         quality, exposure, auto_exp,
         gain, brightness, contrast, saturation, framesize, MAX_FRAMESIZE,
         allAuto, s->status.agc, s->status.agc_gain, s->status.awb, s->status.wb_mode,
@@ -620,7 +626,8 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         zoomEffX10, zoomMaxX10(s->status.framesize),
         zoomCx, zoomCy, sensorMode,
         zoomEffX10 > 10 ? zoomOutW : (int)resolution[s->status.framesize].width,
-        zoomEffX10 > 10 ? zoomOutH : (int)resolution[s->status.framesize].height
+        zoomEffX10 > 10 ? zoomOutH : (int)resolution[s->status.framesize].height,
+        (unsigned)bootId
     );
 
     httpd_resp_set_type(req, "application/json");
@@ -1153,6 +1160,9 @@ void setup() {
 
   delay(10);
 
+
+  // new start: new id (the web server is started in connectToWifi)
+  bootId = (esp_random() ^ micros()) | 1;
 
   // Wi-Fi connection
   connectToWifi();

@@ -39,6 +39,22 @@
   .cam-badge.ok {
     background: #0a0;
   }
+  /* "A" under the number of the active camera */
+  .cam-badge .active-mark {
+    margin-top: 2px;
+    font-size: 11px;
+    line-height: 1;
+  }
+  /* cross position on the sensor, under the camera number */
+  .cam-badge .cross-pos {
+    margin-top: 4px;
+    font-size: 10px;
+    font-weight: normal;
+    line-height: 1.2;
+  }
+  .cam-badge .cross-pos.out {
+    opacity: 0.6;      /* the cross is outside the zoomed view */
+  }
   /* pixel mean chart under the camera images */
   #sumBox, #profileBox, #focusBox, #circleBox, #wifiBox, #metricBoxes {
     width: 100%;
@@ -243,21 +259,28 @@
     <div style="margin:20px;">
         <!-- Auto exposure on: exposure, gain and white balance automatic; off: set by hand below -->
         <button id="autoBtn" class="toggle" onclick="toggleAuto()">Auto exposure: ...</button>
+        <!-- presets: JPEG quality, pixel skipping, scaling, zoom and max fps in one step -->
+        Set:
+        <span id="presetBtns">
+          <button class="toggle" data-preset="1" onclick="applyPreset(1)">1x</button>
+          <button class="toggle" data-preset="2" onclick="applyPreset(2)">2x</button>
+          <button class="toggle" data-preset="4" onclick="applyPreset(4)">4x</button>
+        </span>
         <div id="manual" style="display:none;">
           Exposure: <span id="expVal">...</span><br>
           <input type="range" id="expSlider" min="0" max="332" value="0" oninput="setExposure(this.value)"><br>
           Gain: <span id="gainVal">...</span><br>
-          <input type="range" id="gainSlider" min="0" max="30" value="0" oninput="setGain(this.value)"><br>
-          White balance (64 = 1x):
-          <button id="wbLockBtn" class="toggle on" onclick="toggleWbLock()">1:1:1</button><br>
-          Red: <span id="wbRVal">64</span><br>
-          <input type="range" id="wbRSlider" min="0" max="255" value="64" oninput="setWb('r', this.value)"><br>
-          Green: <span id="wbGVal">64</span><br>
-          <input type="range" id="wbGSlider" min="0" max="255" value="64" oninput="setWb('g', this.value)"><br>
-          Blue: <span id="wbBVal">64</span><br>
-          <input type="range" id="wbBSlider" min="0" max="255" value="64" oninput="setWb('b', this.value)">
+          <input type="range" id="gainSlider" min="0" max="30" value="0" oninput="setGain(this.value)">
+        </div>
+        <!-- move the zoomed view (only while zoomed) -->
+        <div id="panBox" style="display:none;">
+          Move left / right: <span id="panXVal">50</span> %<br>
+          <input type="range" id="panXSlider" min="0" max="100" value="50" oninput="setPan('x', this.value)"><br>
+          Move up / down: <span id="panYVal">50</span> %<br>
+          <input type="range" id="panYSlider" min="0" max="100" value="50" oninput="setPan('y', this.value)">
         </div>
     </div>
+    Graphs:
     <button id="sumBtn" class="toggle" onclick="toggleSum()">Mean</button>
     <button id="profileBtn" class="toggle" onclick="toggleProfile()">Profile</button>
     <button id="focusBtn" class="toggle" onclick="toggleFocus()">Focus</button>
@@ -278,6 +301,10 @@
           <input type="range" id="qualitySlider" min="10" max="63" value="10" oninput="setQuality(this.value)">
       </div>
       <div style="margin:20px;">
+          Max FPS: <span id="fpsLimitVal">...</span><br>
+          <input type="range" id="fpsSlider" min="1" max="50" value="12" oninput="setFps(this.value)">
+      </div>
+      <div style="margin:20px;">
           <!-- frame size = pixel skipping of the sensor (readout mode) + scaling of the image processor -->
           Pixel skipping:
           <span id="modeBtns">
@@ -289,19 +316,20 @@
           <input type="range" id="frameSlider" min="0" max="0" value="0" oninput="setFrameStep(this.value)">
       </div>
       <div style="margin:20px;">
-          <!-- digital zoom around the green cross, the view can be moved when zoomed -->
-          Zoom: <span id="zoomVal">1.0x</span><br>
-          <input type="range" id="zoomSlider" min="1" max="4" step="1" value="1" oninput="setZoom(this.value)">
-          <div id="panBox" style="display:none;">
-            Move left / right: <span id="panXVal">50</span> %<br>
-            <input type="range" id="panXSlider" min="0" max="100" value="50" oninput="setPan('x', this.value)"><br>
-            Move up / down: <span id="panYVal">50</span> %<br>
-            <input type="range" id="panYSlider" min="0" max="100" value="50" oninput="setPan('y', this.value)">
-          </div>
+          <!-- digital zoom around the green cross, the view is moved with the sliders above -->
+          Zoom: <span id="zoomVal">1x</span><br>
+          <input type="range" id="zoomSlider" min="1" max="10" step="1" value="1" oninput="setZoom(this.value)">
       </div>
-      <div style="margin:20px;">
-          Max FPS: <span id="fpsLimitVal">...</span><br>
-          <input type="range" id="fpsSlider" min="1" max="50" value="12" oninput="setFps(this.value)">
+      <!-- manual white balance, only while Auto exposure is off -->
+      <div id="wbBox" style="margin:20px; display:none;">
+          White balance (64 = 1x):
+          <button id="wbLockBtn" class="toggle on" onclick="toggleWbLock()">1:1:1</button><br>
+          Red: <span id="wbRVal">64</span><br>
+          <input type="range" id="wbRSlider" min="0" max="255" value="64" oninput="setWb('r', this.value)"><br>
+          Green: <span id="wbGVal">64</span><br>
+          <input type="range" id="wbGSlider" min="0" max="255" value="64" oninput="setWb('g', this.value)"><br>
+          Blue: <span id="wbBVal">64</span><br>
+          <input type="range" id="wbBSlider" min="0" max="255" value="64" oninput="setWb('b', this.value)">
       </div>
     </div>
 
@@ -311,8 +339,10 @@
     // DOM Elements
     const img = document.getElementById('cameraStreamID');
     const img2 = document.getElementById('camera2StreamID');
-    const cnvs = document.getElementById("myCanvas");
-    const ctx = cnvs.getContext("2d");
+    // cross of the active camera (every camera image has its own cross, see makeCross);
+    // the hidden canvas in the page stands in while there is no camera image
+    const noCross = document.getElementById("myCanvas");
+    let cnvs = noCross;
     var moving = false;
     // the access point of the network (a camera or the LED board), it knows all devices
     const HUB = '192.168.4.1';
@@ -323,6 +353,8 @@
     for (const el of imgs) {
       el._tile = el.parentElement;
       el._badge = el._tile.querySelector('.cam-badge');
+      addBadgeDoubleTap(el);
+      makeCross(el);
     }
 
     // max fps set on each camera (ip -> fps); the camera number turns gray when
@@ -345,7 +377,7 @@
       fetch(`http://${ip}/camera`, {mode: "cors"})
         .then(r => r.json())
         .then(d => {
-          if (d.fps !== undefined) targetFps[ip] = d.fps;
+          onCamInfo(ip, d);
           if (d.sensor) sensors[ip] = d.sensor;
           if (d.ap) camRssi[ip] = 'ap';
           else if (d.rssi) camRssi[ip] = d.rssi;
@@ -385,12 +417,10 @@
     const EMPTY_IMG = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
 
-    function Draw(){
-      cnvs.style.position = "absolute";
-      cnvs.style.left = img.offsetLeft + "px";
-      cnvs.style.top = img.offsetTop + "px";
-
-      var ctx = cnvs.getContext("2d");
+    // green cross with circle on a 50x50 canvas
+    function drawCross(c) {
+      c.style.position = "absolute";
+      var ctx = c.getContext("2d");
       ctx.lineWidth = 3;
       ctx.strokeStyle = '#00ff00';
       // circle
@@ -428,7 +458,8 @@
         y: e.pageY - (parseFloat(cnvs.style.top) || 0),
       };
       moving = true;
-      dragImg = crossTarget();
+      dragImg = activeImg();
+      showCrossPos();
       cnvs.setPointerCapture(e.pointerId);
       e.preventDefault();
     }
@@ -438,8 +469,8 @@
       let left = e.pageX - grab.x;
       let top = e.pageY - grab.y;
       panVel = {x: 0, y: 0};
-      if (!dragImg) dragImg = crossTarget();
-      if (dragImg && zoom.z > 1) {
+      if (!dragImg) dragImg = activeImg();
+      if (dragImg) {
         // image edges and cross center in page coordinates
         const r = dragImg.getBoundingClientRect();
         const x0 = r.left + window.scrollX, x1 = x0 + r.width - 1;
@@ -448,14 +479,19 @@
         const cx = left + half, cy = top + half;
         const over = (v, lo, hi) => v < lo ? v - lo : (v > hi ? v - hi : 0);
         const ox = over(cx, x0, x1), oy = over(cy, y0, y1);
-        // outside: keep the cross on the edge and move the view instead
-        panVel = {x: Math.max(-1, Math.min(1, ox / r.width)), y: Math.max(-1, Math.min(1, oy / r.height))};
+        // the cross stays on its image (another camera: double tap there);
+        // while zoomed, pulling it outside moves the view instead
+        if (zoom.z > 1) {
+          panVel = {x: Math.max(-1, Math.min(1, ox / r.width)), y: Math.max(-1, Math.min(1, oy / r.height))};
+        }
         left -= ox;
         top -= oy;
       }
       cnvs.style.left = left + "px";
       cnvs.style.top = top + "px";
+      storeCrossPos();
       placeOverlays();    // measuring circle and profile line follow the cross
+      showCrossPos();
 
       if ((panVel.x || panVel.y) && !panTimer) panTimer = setInterval(panStep, 100);
       if (!panVel.x && !panVel.y) stopPan();
@@ -467,6 +503,7 @@
       zoom.cx += panVel.x * PAN_SPEED / 10 / zoom.z;
       zoom.cy += panVel.y * PAN_SPEED / 10 / zoom.z;
       sendZoom();
+      storeCrossPos();    // the cross stays on the edge, so it now points at another sensor point
     }
 
     function stopPan() {
@@ -474,22 +511,135 @@
       panTimer = null;
     }
 
+    // the cross positions are written under the camera numbers (showBadges)
+    function showCrossPos() {
+      showBadges();
+    }
+
     function endDrag(e) {
       moving = false;
       stopPan();
       dragImg = null;
+      saveCrossPos();
+      showBadges();
+      syncViewCam();      // the zoom controls act on the active camera
       if (cnvs.hasPointerCapture(e.pointerId)) cnvs.releasePointerCapture(e.pointerId);
     }
 
-    // draw the cross
-    Draw();
-    // activate dragging
-    cnvs.style.touchAction = 'none';    // no page scrolling while dragging on a phone
-    cnvs.style.cursor = 'move';
-    cnvs.addEventListener("pointerdown", startDrag);
-    cnvs.addEventListener("pointermove", drag);
-    cnvs.addEventListener("pointerup", endDrag);
-    cnvs.addEventListener("pointercancel", endDrag);
+    // the stand-in cross is never shown
+    noCross.style.position = 'absolute';
+    noCross.style.display = 'none';
+
+    // own cross for a camera image; grabbing it makes that camera active
+    function makeCross(el) {
+      const c = document.createElement('canvas');
+      c.width = 50;
+      c.height = 50;
+      drawCross(c);
+      c.style.display = 'none';
+      c.style.touchAction = 'none';    // no page scrolling while dragging on a phone
+      c.style.cursor = 'move';
+      c.addEventListener('pointerdown', e => {
+        if (el._n && el._n != activeCamN) setActiveCam(el._n);
+        startDrag(e);
+      });
+      c.addEventListener('pointermove', drag);
+      c.addEventListener('pointerup', endDrag);
+      c.addEventListener('pointercancel', endDrag);
+      document.body.appendChild(c);
+      el._cross = c;
+    }
+
+    // Cross position of each camera on its sensor (camera number -> {x, y}, 0..1 of
+    // the full sensor width / height), kept in the browser so it also survives a
+    // reload. It is absolute: when the zoomed view moves, the cross moves with the
+    // scene, and it is hidden while its point is outside the view.
+    const crossSensor = (() => {
+      try { return JSON.parse(localStorage.getItem('crossSensor')) || {}; } catch (e) { return {}; }
+    })();
+
+    function saveCrossPos() {
+      try { localStorage.setItem('crossSensor', JSON.stringify(crossSensor)); } catch (e) {}
+    }
+
+    function crossPosOf(n) {
+      return crossSensor[n] || {x: 0.5, y: 0.5};
+    }
+
+    // start id each camera reported last (camera number -> id); a camera that
+    // (re)started reports a new one and its cross goes back to the middle of the sensor
+    const crossBoot = (() => {
+      try { return JSON.parse(localStorage.getItem('crossBoot')) || {}; } catch (e) { return {}; }
+    })();
+
+    function checkCameraStart(ip, boot) {
+      const cam = camList.find(c => c.ip == ip);
+      if (!cam || boot === undefined || crossBoot[cam.n] === boot) return;
+      crossBoot[cam.n] = boot;
+      delete crossSensor[cam.n];
+      saveCrossPos();
+      try { localStorage.setItem('crossBoot', JSON.stringify(crossBoot)); } catch (e) {}
+      if (!moving) placeCrosses();
+    }
+
+    // view of a camera: zoom and window center (the active camera's from this page,
+    // which is the newest), with the center kept inside the sensor like the camera does
+    function viewOf(el) {
+      let v = {z: 1, cx: 0.5, cy: 0.5};
+      if (el._n == activeCamN) v = {z: zoom.z, cx: zoom.cx, cy: zoom.cy};
+      else {
+        const d = camInfo[el._ip];
+        if (d && d.zoom !== undefined) v = {z: d.zoom / 10, cx: d.zx / 1000, cy: d.zy / 1000};
+      }
+      const half = 0.5 / v.z;
+      v.cx = Math.min(Math.max(v.cx, half), 1 - half);
+      v.cy = Math.min(Math.max(v.cy, half), 1 - half);
+      return v;
+    }
+
+    // remember the sensor point under the active cross
+    function storeCrossPos() {
+      const el = activeImg();
+      if (!el) return;
+      const r = el.getBoundingClientRect(), c = cnvs.getBoundingClientRect();
+      const v = viewOf(el);
+      const rx = (c.left + c.width / 2 - r.left) / r.width;      // 0..1 across the image
+      const ry = (c.top + c.height / 2 - r.top) / r.height;
+      const clamp = p => Math.min(Math.max(p, 0), 0.9999);
+      crossSensor[activeCamN] = {x: clamp(v.cx + (rx - 0.5) / v.z), y: clamp(v.cy + (ry - 0.5) / v.z)};
+    }
+
+    // double tap on the active camera's number: its cross to the middle of its view
+    function centerCross(el) {
+      const v = viewOf(el);
+      crossSensor[el._n] = {x: v.cx, y: v.cy};
+      saveCrossPos();
+      placeCrosses();
+      showBadges();
+    }
+
+    // every shown camera image shows its cross at its sensor point, if that is in the
+    // view (center at first); the active camera's cross is drawn fully, the others faded
+    function placeCrosses() {
+      for (const el of imgs) {
+        const c = el._cross;
+        if (!c) continue;
+        if (moving && c === cnvs) continue;      // being dragged
+        const p = crossPosOf(el._n);
+        const v = viewOf(el);
+        const rx = (p.x - v.cx) * v.z + 0.5;     // 0..1 across the image, outside = not in the view
+        const ry = (p.y - v.cy) * v.z + 0.5;
+        el._crossOut = rx < 0 || rx >= 1 || ry < 0 || ry >= 1;
+        if (!isShown(el) || el._crossOut) { c.style.display = 'none'; continue; }
+        c.style.display = '';
+        c.style.opacity = el._n == activeCamN ? '1' : '0.45';
+        const r = el.getBoundingClientRect();
+        c.style.left = (r.left + window.scrollX + rx * r.width - c.offsetWidth / 2) + 'px';
+        c.style.top = (r.top + window.scrollY + ry * r.height - c.offsetHeight / 2) + 'px';
+      }
+      placeOverlays();
+      showBadges();
+    }
 
 
     /* ---------- video streams ---------- */
@@ -660,11 +810,12 @@
       metricSample(sample);
     }, 1000);
 
-    // reopen streams that stopped delivering frames
+    // reopen streams that stopped delivering frames; keep the cross on a camera image
     setInterval(() => {
       for (const el of imgs) {
         if (el._ctrl && Date.now() - el._lastFrame > STALL_MS) el._ctrl.abort();
       }
+      keepCrossOnImage();
     }, 500);
 
     // phone screen off / tab in background: close the streams (frees the
@@ -784,11 +935,101 @@
       const cx = c.left + c.width / 2;
       const cy = c.top + c.height / 2;
       for (const el of imgs) {
-        if (!el._ctrl || el._tile.style.display == 'none') continue;
+        if (!isShown(el)) continue;
         const r = el.getBoundingClientRect();
         if (cx >= r.left && cx < r.right && cy >= r.top && cy < r.bottom) return el;
       }
       return null;
+    }
+
+    // a camera image that is on the page with a picture (not hidden, not empty)
+    function isShown(el) {
+      return el._ip && el._ip != '0' && el._tile.style.display != 'none' && el.getBoundingClientRect().width > 0;
+    }
+
+    /* ---------- active camera ---------- */
+
+    // The active camera gets all camera settings, the cross is on its image and
+    // its number badge shows a small "A". Double tap on a number badge makes that
+    // camera active.
+    let activeCamN = null;
+
+    // the active camera's ip, null = no camera shown
+    function activeIp() {
+      const cam = camList.find(c => c.n == activeCamN);
+      return cam ? cam.ip : null;
+    }
+
+    // the cameras the settings act on: the active one
+    function activeTargets() {
+      const ip = activeIp();
+      return ip ? [ip] : [];
+    }
+
+    function activeImg() {
+      return imgs.find(el => el._n == activeCamN && isShown(el)) || null;
+    }
+
+    // the active camera must be one of the shown cameras
+    function ensureActiveCam() {
+      const shown = camList.filter(c => shownCams.has(c.n)).map(c => c.n);
+      if (!shown.includes(activeCamN)) setActiveCam(shown.length ? shown[0] : null);
+    }
+
+    function setActiveCam(n) {
+      if (n === activeCamN) return;
+      activeCamN = n;
+      showBadges();
+      // its own cross becomes the one for the settings and the graphs
+      const el = activeImg() || imgs.find(i => i._n == n);
+      cnvs = el && el._cross ? el._cross : noCross;
+      placeCrosses();
+      refreshCameraParam();     // the settings show the active camera
+      syncViewCam();
+      showAnalysisInfo();
+    }
+
+    // camera number next to each image, "A" under the active one, below that the
+    // cross position in sensor pixels (gray while the cross is outside the view)
+    function showBadges() {
+      for (const el of imgs) {
+        if (!el._n) { el._badge.innerHTML = ''; continue; }
+        const p = crossPosOf(el._n);
+        el._badge.innerHTML = `${el._n}` +
+          (el._n == activeCamN ? '<div class="active-mark">A</div>' : '') +
+          `<div class="cross-pos${el._crossOut ? ' out' : ''}">x ${Math.round(p.x * 1600)}<br>` +
+          `y ${Math.round(p.y * 1200)}</div>`;
+      }
+    }
+
+    // double tap (phone) or double click on the number badge: that camera becomes active
+    function addBadgeDoubleTap(el) {
+      let last = 0;
+      const badge = el._badge;
+      badge.style.touchAction = 'manipulation';     // no double-tap zoom of the page
+      badge.style.cursor = 'pointer';
+      badge.title = 'double tap: make this camera active (again: its cross to the middle)';
+      badge.addEventListener('pointerup', () => {
+        const now = Date.now();
+        if (now - last < 350) {
+          last = 0;
+          if (el._n == activeCamN) centerCross(el);
+          else if (el._n) setActiveCam(el._n);
+          return;
+        }
+        last = now;
+      });
+    }
+
+    // Every cross stays on its camera image at its remembered position, also when
+    // the image changes size or moves on the page; a camera without image shows
+    // no cross
+    function keepCrossOnImage() {
+      if (moving) return;
+      ensureActiveCam();
+      const el = activeImg();
+      cnvs = el && el._cross ? el._cross : noCross;
+      placeCrosses();
     }
 
     // pink measuring circle and cyan profile line on the image, both follow the
@@ -797,9 +1038,12 @@
       const cx = (parseFloat(cnvs.style.left) || 0) + cnvs.offsetWidth / 2;
       const cy = (parseFloat(cnvs.style.top) || 0) + cnvs.offsetHeight / 2;
 
+      // nothing on the image while the cross is hidden (no camera image)
+      const crossShown = cnvs.style.display != 'none';
+
       // the circle and its diameter slider are used by Mean and Focus
-      const circleOn = sumOn || focusOn;
-      document.getElementById('circleBox').style.display = circleOn ? '' : 'none';
+      document.getElementById('circleBox').style.display = (sumOn || focusOn) ? '' : 'none';
+      const circleOn = (sumOn || focusOn) && crossShown;
       const circle = document.getElementById('sumCircle');
       circle.style.display = circleOn ? 'block' : 'none';   // the stylesheet hides it by default
       if (circleOn) {
@@ -810,7 +1054,7 @@
 
       // the line spans the image the cross is on
       const line = document.getElementById('profileLine');
-      const el = profileOn ? crossTarget() : null;
+      const el = profileOn && crossShown ? crossTarget() : null;
       line.style.display = el ? 'block' : 'none';
       if (el) {
         const r = el.getBoundingClientRect();
@@ -1434,13 +1678,62 @@
         .finally(() => { q.busy = false; flush(key, ip, path); });
     }
 
-    function sendSet(param, value) {
-      for (const ip of targets()) {
+    // set a camera parameter on the cameras ips (default: the active camera)
+    function sendSet(param, value, ips = activeTargets()) {
+      for (const ip of ips) {
         queueSet(ip, 'camera', param, value, d => {
-          if (d.fps !== undefined) targetFps[ip] = d.fps;
-          if (ip == targets()[0]) showParam(d);
+          onCamInfo(ip, d);
+          if (ip == activeIp()) showParam(d);
         });
       }
+    }
+
+    /* ---------- view camera: zoom, view sliders and presets act per camera ---------- */
+
+    // latest settings of every camera (ip -> its /camera answer)
+    const camInfo = {};
+    let zoomChangedAt = 0;    // a zoom change on this page is newer than answers still on the way
+    let viewCamNow;           // camera whose zoom the controls show
+
+    // zoom, view sliders and presets act on the active camera (the cross is on its image)
+    function viewCam() {
+      return activeIp();
+    }
+
+    function viewTargets() {
+      return activeTargets();
+    }
+
+    function onCamInfo(ip, d) {
+      if (d.quality === undefined) return;
+      checkCameraStart(ip, d.boot);
+      camInfo[ip] = d;
+      if (d.fps !== undefined) targetFps[ip] = d.fps;
+      if (ip == activeIp()) loadViewState(d);
+    }
+
+    // zoom of the view camera into the zoom controls
+    function loadViewState(d) {
+      if (d.zoom !== undefined && Date.now() - zoomChangedAt > 1500) {
+        zoom = {z: d.zoom / 10, cx: d.zx / 1000, cy: d.zy / 1000};
+        zoomMax = d.zoomMax / 10;
+        zoomOut = d.outW ? [d.outW, d.outH] : null;
+        zoomFrame = d.framesize;
+        clampZoomCenter();
+        showZoom();
+      }
+      showPresets();
+    }
+
+    // the cross moved (or the cameras changed): show the zoom of the camera it is on now
+    function syncViewCam() {
+      const ip = activeIp();
+      if (ip === viewCamNow) return;
+      viewCamNow = ip;
+      zoomChangedAt = 0;
+      if (camInfo[ip]) loadViewState(camInfo[ip]);
+      else showZoom();
+      if (ip) fetchCamStatus(ip);
     }
 
     function showParam(d) {
@@ -1463,14 +1756,8 @@
       showAuto();
 
       frameSize = d.framesize;
-      if (d.zoom !== undefined) {
-        zoom = {z: d.zoom / 10, cx: d.zx / 1000, cy: d.zy / 1000};
-        zoomMax = d.zoomMax / 10;
-        zoomOut = d.outW ? [d.outW, d.outH] : null;
-        sensorModeNow = d.sensorMode;
-        clampZoomCenter();
-        showZoom();
-      }
+      // the zoom controls show the camera under the cross (loadViewState)
+      if (d.sensorMode !== undefined) sensorModeNow = d.sensorMode;
       showFrameSize();
       showExposure();
 
@@ -1480,13 +1767,15 @@
         ps.value = d.fps;
         document.getElementById('fpsLimitVal').innerText = d.fps;
       }
+      showPresets();
     }
 
     function refreshCameraParam() {
-      if (targets().length == 0) return Promise.resolve();
-      return fetch(`http://${targets()[0]}/camera`, {mode: "cors"})
+      const ip = activeIp();
+      if (!ip) return Promise.resolve();
+      return fetch(`http://${ip}/camera`, {mode: "cors"})
         .then(r => r.json())
-        .then(showParam)
+        .then(d => { onCamInfo(ip, d); showParam(d); })
         .catch(() => {});
     }
 
@@ -1578,7 +1867,41 @@
     function setQuality(val) {
       current = parseInt(val);
       document.getElementById('qval').innerText = current;
+      document.getElementById('qualitySlider').value = current;
+      showPresets();
       sendSet('quality', current);
+    }
+
+    // Set 1x / 2x / 4x: JPEG quality 10 and max fps 12, and
+    //   1x: pixel skipping 1:4, scaling 1 (400x296),   zoom 1
+    //   2x: pixel skipping 1:2, scaling 1 (800x600),   zoom 2
+    //   4x: pixel skipping 1:1, scaling 1 (1600x1200), zoom 4
+    // so all three send frames of about 400x300 with 1, 1/2, 1/4 of the field of view
+    const PRESETS = {1: {fs: 6, z: 1}, 2: {fs: 9, z: 2}, 4: {fs: 13, z: 4}};
+    const PRESET_QUALITY = 10;
+    const PRESET_FPS = 12;
+
+    // on the camera under the cross (all shown cameras when the cross is not on an image)
+    function applyPreset(n) {
+      const p = PRESETS[n];
+      const ips = viewTargets();
+      sendSet('quality', PRESET_QUALITY, ips);
+      sendSet('fps', PRESET_FPS, ips);
+      for (const ip of ips) targetFps[ip] = PRESET_FPS;
+      sendSet('framesize', p.fs, ips);
+      zoomFrame = p.fs;
+      zoomMax = zoomMaxFor(p.fs);
+      setZoom(p.z);           // around the green cross, like the zoom slider
+    }
+
+    // the preset button is filled while the camera under the cross uses all its settings
+    function showPresets() {
+      const d = camInfo[activeIp()];
+      for (const b of document.querySelectorAll('#presetBtns button')) {
+        const p = PRESETS[b.dataset.preset];
+        b.classList.toggle('on', !!d && d.quality == PRESET_QUALITY && d.fps == PRESET_FPS &&
+                                 d.framesize == p.fs && Math.round(d.zoom / 10) == p.z);
+      }
     }
 
     // frame sizes of the camera library (index = framesize value)
@@ -1659,10 +1982,12 @@
       zoomMax = zoomMaxFor(val);
       if (zoom.z > zoomMax) zoom.z = zoomMax;
       zoomOut = null;
+      zoomFrame = val;
       sensorModeNow = null;
       showFrameSize();
       showZoom();
       showExposure();          // another sensor mode may have another exposure range
+      showPresets();
       sendSet('framesize', val);
     }
 
@@ -1670,9 +1995,10 @@
     // scaling, so the frame gets 1/z of the frame size (e.g. 1600x1200, zoom 4 -> 400x300).
     // cx / cy = center of the shown window as a fraction of the sensor width / height
     let zoom = {z: 1, cx: 0.5, cy: 0.5};
-    const ZOOM_MAX = 4;        // largest zoom
+    const ZOOM_MAX = 10;       // largest zoom
     let zoomMax = ZOOM_MAX;    // lower for small frames: the frame stays at least 64 pixels wide
     let zoomOut = null;        // frame size the camera sends while zoomed [w, h]
+    let zoomFrame = null;      // frame size setting of the camera the zoom acts on
     let sensorModeNow = null;  // readout mode the camera reports (0 = 1:4, 1 = 1:2, 2 = 1:1)
 
     // whole zoom steps only
@@ -1692,7 +2018,7 @@
       slider.max = zoomMax;
       slider.value = zoom.z;
       // frame size while zoomed: from the camera, else estimated like the camera does
-      const [fw, fh] = frameName(frameSize).split('x').map(Number);
+      const [fw, fh] = frameName(zoomFrame != null ? zoomFrame : frameSize).split('x').map(Number);
       const out = zoomOut || [Math.max(8, Math.floor(fw / zoom.z / 8) * 8), Math.max(8, Math.floor(fh / zoom.z / 8) * 8)];
       document.getElementById('zoomVal').innerText = zoom.z.toFixed(0) + 'x' +
         (zoom.z > 1 ? ` = ${out[0]}x${out[1]}, field of view ${(100 / zoom.z).toFixed(0)} %` : '') +
@@ -1705,13 +2031,16 @@
       document.getElementById('panYVal').innerText = py;
     }
 
+    // to the camera under the cross (all shown cameras when the cross is not on an image)
     function sendZoom() {
       clampZoomCenter();
       zoomOut = null;            // until the camera answers
+      zoomChangedAt = Date.now();
       showZoom();
-      sensorModeNow = null;      // the camera may switch the readout mode, its answer tells
-      showExposure();
-      sendSet('zoom', `${Math.round(zoom.z * 10)},${Math.round(zoom.cx * 1000)},${Math.round(zoom.cy * 1000)}`);
+      if (!moving) placeCrosses();   // the crosses move with the scene
+      showPresets();
+      sendSet('zoom', `${Math.round(zoom.z * 10)},${Math.round(zoom.cx * 1000)},${Math.round(zoom.cy * 1000)}`,
+              viewTargets());
     }
 
     // zoom so that the image point under the green cross stays under the cross
@@ -1742,7 +2071,9 @@
     // frames per second each camera sends, lower = less WiFi load
     function setFps(val) {
       document.getElementById('fpsLimitVal').innerText = val;
-      for (const ip of targets()) targetFps[ip] = parseInt(val);
+      document.getElementById('fpsSlider').value = val;
+      for (const ip of activeTargets()) targetFps[ip] = parseInt(val);
+      showPresets();
       sendSet('fps', val);
     }
 
@@ -1759,6 +2090,7 @@
       b.innerText = "Auto exposure: " + (allAuto ? "ON" : "OFF");
       b.classList.toggle('on', !!allAuto);
       document.getElementById('manual').style.display = allAuto ? 'none' : '';
+      document.getElementById('wbBox').style.display = allAuto ? 'none' : '';   // in Advanced
       showWb();
     }
 
@@ -1842,10 +2174,13 @@
         const el = tile.querySelector('img');
         el._tile = tile;
         el._badge = tile.querySelector('.cam-badge');
+        addBadgeDoubleTap(el);
+        makeCross(el);
         imgs.push(el);
       }
       return imgs[i];
     }
+
 
     // one toggle button per known camera
     function renderCamButtons() {
@@ -1874,9 +2209,10 @@
       for (let i = 0; i < Math.max(imgs.length, shown.length); i++) {
         const el = getImg(i);
         el._n = shown[i] ? shown[i].n : 0;
-        el._badge.innerText = el._n || '';
         setStream(el, shown[i] ? shown[i].ip : null);
       }
+      ensureActiveCam();
+      showBadges();
       for (const cam of shown) fetchCamStatus(cam.ip);
       refreshCameraParam();
     }
@@ -1911,6 +2247,7 @@
       if (document.hidden) return;
       const ips = wifiOn ? camList.map(cam => cam.ip) : targets();
       for (const ip of ips) fetchCamStatus(ip);
+      syncViewCam();      // the images may have moved under the cross
       fetchApWifi();
       if (wifiOn) wifiSample();     // uses the answers of the previous round
     }, WIFI_MS);
