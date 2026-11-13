@@ -93,6 +93,7 @@
     border-bottom: 1px dashed #00e5ff;
     background: rgba(0, 229, 255, 0.2);
     pointer-events: none;
+    z-index: 2;             /* above the camera images, also when they are flipped / turned */
   }
   #profileLine.vertical {
     border-top: none;
@@ -112,6 +113,7 @@
     border: 2px dashed #ff00ff;
     border-radius: 50%;
     pointer-events: none;   /* clicks go to the cross below */
+    z-index: 2;             /* above the camera images, also when they are flipped / turned */
   }
   /* slider with − and + buttons (added by addStepButtons) */
   .slider-row {
@@ -173,6 +175,9 @@
   .led-green { background: #0a0; }
   .led-blue  { background: #06c; }
   .led-white { background: #aaa; color: #000 !important; }
+  .led-off   { background: #333; }
+  /* camera controls and graphs: hidden while the network has no camera (e.g. only an LED board) */
+  body.no-cams .cam-only { display: none !important; }
   /* toggle buttons (cameras, advanced): outlined = off, filled = on */
   .toggle {
     padding: 10px;
@@ -204,7 +209,7 @@
         <!-- one toggle button per camera, filled by renderCamButtons() -->
         <div id='camButtons'></div>
         <!-- mean of the pixels inside the pink circle, per channel, last 100 frames -->
-        <div id="sumBox" style="display:none;">
+        <div id="sumBox" class="cam-only" style="display:none;">
           <div id="sumInfo">...</div>
           <canvas id="sumChart" aria-label="Mean of red, green and blue under the green cross, last 100 frames"></canvas>
           <div id="sumLegend">
@@ -215,7 +220,7 @@
           </div>
         </div>
         <!-- sharpness (Tenengrad) inside the pink circle, last 100 frames -->
-        <div id="focusBox" style="display:none;">
+        <div id="focusBox" class="cam-only" style="display:none;">
           <div id="focusInfo">...</div>
           <canvas id="focusChart" aria-label="Sharpness inside the pink circle, last 100 frames"></canvas>
           <div>
@@ -234,14 +239,14 @@
           <div id="wifiWhen" class="sum-where"></div>
         </div>
         <!-- frame rate / transfer time / max gap of every shown camera, filled by buildMetricBoxes() -->
-        <div id="metricBoxes"></div>
+        <div id="metricBoxes" class="cam-only"></div>
         <!-- size of the pink circle, used by Mean and Focus -->
-        <div id="circleBox" style="display:none;">
+        <div id="circleBox" class="cam-only" style="display:none;">
           Circle diameter: <span id="sumDiaVal">48</span> px<br>
           <input type="range" id="sumDiaSlider" min="4" max="200" value="48" oninput="setSumDiameter(this.value)" style="width:100%;">
         </div>
         <!-- intensity profile along the line through the cross, per channel -->
-        <div id="profileBox" style="display:none;">
+        <div id="profileBox" class="cam-only" style="display:none;">
           <div id="profileInfo">...</div>
           <canvas id="profileChart" aria-label="Red, green and blue intensity along the line through the green cross"></canvas>
           <div>
@@ -256,11 +261,11 @@
           <input type="range" id="profThickSlider" min="1" max="50" value="1" oninput="setProfileThickness(this.value)" style="width:100%;">
         </div>
     </div>
-    <div style="margin:20px;">
+    <div class="cam-only" style="margin:20px;">
         <!-- Auto exposure on: exposure, gain and white balance automatic; off: set by hand below -->
         <button id="autoBtn" class="toggle" onclick="toggleAuto()">Auto exposure: ...</button>
         <!-- presets: JPEG quality, pixel skipping, scaling, zoom and max fps in one step -->
-        Set:
+        Zoom:
         <span id="presetBtns">
           <button class="toggle" data-preset="1" onclick="applyPreset(1)">1x</button>
           <button class="toggle" data-preset="2" onclick="applyPreset(2)">2x</button>
@@ -279,22 +284,32 @@
           Move up / down: <span id="panYVal">50</span> %<br>
           <input type="range" id="panYSlider" min="0" max="100" value="50" oninput="setPan('y', this.value)">
         </div>
+        <div style="margin-top:10px;">
+          <!-- how the image of the active camera is shown; the graphs use the shown image; kept by the camera -->
+          Image:
+          <button id="flipHBtn" class="toggle" onclick="toggleOrient(1)">Flip horizontal</button>
+          <button id="flipVBtn" class="toggle" onclick="toggleOrient(2)">Flip vertical</button>
+          <button id="rotBtn" class="toggle" onclick="rotateOrient()">Rotate: 0°</button>
+          <span id="orientNote" class="sum-where"></span>
+        </div>
     </div>
-    Graphs:
-    <button id="sumBtn" class="toggle" onclick="toggleSum()">Mean</button>
-    <button id="profileBtn" class="toggle" onclick="toggleProfile()">Profile</button>
-    <button id="focusBtn" class="toggle" onclick="toggleFocus()">Focus</button>
+    <span class="cam-only">
+      Graphs:
+      <button id="sumBtn" class="toggle" onclick="toggleSum()">Mean</button>
+      <button id="profileBtn" class="toggle" onclick="toggleProfile()">Profile</button>
+      <button id="focusBtn" class="toggle" onclick="toggleFocus()">Focus</button>
+    </span>
     <div>
       <button id="advBtn" class="toggle" onclick="toggleAdvanced()">Advanced</button>
       <!-- charts of the connection, only while Advanced is on -->
       <span id="advCharts" style="display:none;">
         <button id="wifiBtn" class="toggle" onclick="toggleWifi()">Wifi</button>
-        <button id="fpsBtn" class="toggle" onclick="toggleMetric('fps')">FPS</button>
-        <button id="xferBtn" class="toggle" onclick="toggleMetric('xfer')">Transfer</button>
-        <button id="gapBtn" class="toggle" onclick="toggleMetric('gap')">Gap</button>
+        <button id="fpsBtn" class="toggle cam-only" onclick="toggleMetric('fps')">FPS</button>
+        <button id="xferBtn" class="toggle cam-only" onclick="toggleMetric('xfer')">Transfer</button>
+        <button id="gapBtn" class="toggle cam-only" onclick="toggleMetric('gap')">Gap</button>
       </span>
     </div>
-    <div id="advanced" style="display:none;">
+    <div id="advanced" class="cam-only" style="display:none;">
       <p>Stream: <span id='fpsval'>...</span></p>
       <div style="margin:20px;">
           JPEG quality: <span id="qval">...</span> (lower = better image, larger frames)<br>
@@ -303,6 +318,11 @@
       <div style="margin:20px;">
           Max FPS: <span id="fpsLimitVal">...</span><br>
           <input type="range" id="fpsSlider" min="1" max="50" value="12" oninput="setFps(this.value)">
+      </div>
+      <div style="margin:20px;">
+          <!-- lower power = smaller current peaks: helps a weak battery, costs range; kept by the camera over restarts -->
+          WiFi transmit power: <span id="txVal">...</span> (lower for weak batteries, less range)<br>
+          <input type="range" id="txSlider" min="0" max="10" value="10" oninput="setTxPower(this.value)">
       </div>
       <div style="margin:20px;">
           <!-- frame size = pixel skipping of the sensor (readout mode) + scaling of the image processor -->
@@ -355,6 +375,7 @@
       el._badge = el._tile.querySelector('.cam-badge');
       addBadgeDoubleTap(el);
       makeCross(el);
+      watchOrient(el);
     }
 
     // max fps set on each camera (ip -> fps); the camera number turns gray when
@@ -482,7 +503,9 @@
         // the cross stays on its image (another camera: double tap there);
         // while zoomed, pulling it outside moves the view instead
         if (zoom.z > 1) {
-          panVel = {x: Math.max(-1, Math.min(1, ox / r.width)), y: Math.max(-1, Math.min(1, oy / r.height))};
+          // direction on the shown image -> on the sensor
+          const d = offsetToSensor(orientOf(dragImg), ox / r.width, oy / r.height);
+          panVel = {x: Math.max(-1, Math.min(1, d.x)), y: Math.max(-1, Math.min(1, d.y))};
         }
         left -= ox;
         top -= oy;
@@ -539,6 +562,7 @@
       c.style.display = 'none';
       c.style.touchAction = 'none';    // no page scrolling while dragging on a phone
       c.style.cursor = 'move';
+      c.style.zIndex = '3';            // above the images and the circle / profile line
       c.addEventListener('pointerdown', e => {
         if (el._n && el._n != activeCamN) setActiveCam(el._n);
         startDrag(e);
@@ -603,10 +627,11 @@
       if (!el) return;
       const r = el.getBoundingClientRect(), c = cnvs.getBoundingClientRect();
       const v = viewOf(el);
-      const rx = (c.left + c.width / 2 - r.left) / r.width;      // 0..1 across the image
-      const ry = (c.top + c.height / 2 - r.top) / r.height;
-      const clamp = p => Math.min(Math.max(p, 0), 0.9999);
-      crossSensor[activeCamN] = {x: clamp(v.cx + (rx - 0.5) / v.z), y: clamp(v.cy + (ry - 0.5) / v.z)};
+      // 0..1 across the shown image -> across the image as the camera sends it
+      const p = toSensorImg(orientOf(el), (c.left + c.width / 2 - r.left) / r.width,
+                                          (c.top + c.height / 2 - r.top) / r.height);
+      const clamp = q => Math.min(Math.max(q, 0), 0.9999);
+      crossSensor[activeCamN] = {x: clamp(v.cx + (p.x - 0.5) / v.z), y: clamp(v.cy + (p.y - 0.5) / v.z)};
     }
 
     // double tap on the active camera's number: its cross to the middle of its view
@@ -634,11 +659,146 @@
         c.style.display = '';
         c.style.opacity = el._n == activeCamN ? '1' : '0.45';
         const r = el.getBoundingClientRect();
-        c.style.left = (r.left + window.scrollX + rx * r.width - c.offsetWidth / 2) + 'px';
-        c.style.top = (r.top + window.scrollY + ry * r.height - c.offsetHeight / 2) + 'px';
+        const s = toShown(orientOf(el), rx, ry);   // on the shown (flipped / turned) image
+        c.style.left = (r.left + window.scrollX + s.x * r.width - c.offsetWidth / 2) + 'px';
+        c.style.top = (r.top + window.scrollY + s.y * r.height - c.offsetHeight / 2) + 'px';
       }
       placeOverlays();
       showBadges();
+    }
+
+
+    /* ---------- image orientation: flip and rotate ---------- */
+
+    // Per camera, kept by the camera ("orient"): bit 0 = flip horizontal, bit 1 = flip
+    // vertical, bits 2-3 = clockwise quarter turns, done after the flips. The camera
+    // sends the frames as the sensor delivers them; the page shows them turned (CSS)
+    // and the graphs read the turned image. The cross stays on its point of the scene,
+    // zoom and the view sliders work in the directions of the shown image.
+    const oH = o => o & 1, oV = o => (o >> 1) & 1, oRot = o => (o >> 2) & 3;
+    const orientLocal = {};   // ip -> {o, t}: just set here, newer than answers still on the way
+
+    function orientOf(el) {
+      const ip = el && el._ip;
+      if (!ip || ip == '0') return 0;
+      const l = orientLocal[ip];
+      if (l && Date.now() - l.t < 3000) return l.o;
+      const d = camInfo[ip];
+      return d && d.orient ? d.orient : 0;
+    }
+
+    // point (0..1) of the sensor image -> point of the shown image, and back
+    function toShown(o, x, y) {
+      if (oH(o)) x = 1 - x;
+      if (oV(o)) y = 1 - y;
+      for (let k = 0; k < oRot(o); k++) [x, y] = [1 - y, x];
+      return {x, y};
+    }
+
+    function toSensorImg(o, x, y) {
+      for (let k = 0; k < oRot(o); k++) [x, y] = [y, 1 - x];
+      if (oV(o)) y = 1 - y;
+      if (oH(o)) x = 1 - x;
+      return {x, y};
+    }
+
+    // offset from the center (or a direction) on the shown image -> on the sensor image
+    function offsetToSensor(o, dx, dy) {
+      const p = toSensorImg(o, 0.5 + dx, 0.5 + dy);
+      return {x: p.x - 0.5, y: p.y - 0.5};
+    }
+
+    // turn the <img> with CSS; turned by 90° its layout box gets the turned size
+    // (margins), so it does not overlap the page, and it is as wide as the page allows
+    function applyOrient(el) {
+      const o = orientOf(el);
+      const s = el.style;
+      el._orient = o;
+      s.transform = o ? `rotate(${oRot(o) * 90}deg) scale(${oH(o) ? -1 : 1}, ${oV(o) ? -1 : 1})` : '';
+      const W = el.naturalWidth, H = el.naturalHeight;
+      if (oRot(o) % 2 == 0 || !W || !H) {
+        s.width = s.height = s.margin = s.maxWidth = '';
+        return;
+      }
+      const avail = Math.max(50, el._tile.parentElement.clientWidth - 46);   // 46 = number badge
+      const k = Math.min(1, avail / H);
+      const w = W * k, h = H * k;
+      s.maxWidth = 'none';
+      s.width = w + 'px';
+      s.height = h + 'px';
+      s.margin = `${(w - h) / 2}px ${(h - w) / 2}px`;
+      el._natW = W;
+      el._natH = H;
+    }
+
+    // every new frame: turn again when the orientation or (turned by 90°) the frame size changed
+    function watchOrient(el) {
+      el._orient = 0;
+      el.addEventListener('load', () => {
+        const o = orientOf(el);
+        if (o == el._orient && (oRot(o) % 2 == 0 || (el.naturalWidth == el._natW && el.naturalHeight == el._natH))) return;
+        applyOrient(el);
+        if (!moving) placeCrosses();
+      });
+    }
+    window.addEventListener('resize', () => {
+      for (const el of imgs) if (oRot(el._orient) % 2) applyOrient(el);
+    });
+
+    // the frame as shown (for the graphs): the bitmap itself, or turned into a canvas
+    const orientCv = document.createElement('canvas');
+    const orientCtx = orientCv.getContext('2d');
+
+    function orientedFrame(bmp, o) {
+      if (!o) return bmp;
+      const W = bmp.width, H = bmp.height, odd = oRot(o) % 2;
+      orientCv.width = odd ? H : W;
+      orientCv.height = odd ? W : H;
+      orientCtx.setTransform(1, 0, 0, 1, 0, 0);
+      orientCtx.translate(orientCv.width / 2, orientCv.height / 2);
+      orientCtx.rotate(oRot(o) * Math.PI / 2);
+      orientCtx.scale(oH(o) ? -1 : 1, oV(o) ? -1 : 1);
+      orientCtx.drawImage(bmp, -W / 2, -H / 2);
+      return orientCv;
+    }
+
+    function showOrient() {
+      const o = orientOf(activeImg());
+      document.getElementById('flipHBtn').classList.toggle('on', !!oH(o));
+      document.getElementById('flipVBtn').classList.toggle('on', !!oV(o));
+      const rot = document.getElementById('rotBtn');
+      rot.classList.toggle('on', oRot(o) > 0);
+      rot.innerText = `Rotate: ${oRot(o) * 90}°`;
+    }
+
+    // on the active camera, which keeps it
+    function setOrient(o) {
+      const el = activeImg();
+      if (!el) return;
+      const ip = el._ip;
+      orientLocal[ip] = {o, t: Date.now()};
+      document.getElementById('orientNote').innerText = '';
+      applyOrient(el);
+      placeCrosses();
+      showZoom();
+      showOrient();
+      queueSet(ip, 'camera', 'orient', o, d => {
+        if (d.error) {           // camera with an older firmware
+          document.getElementById('orientNote').innerText = 'not kept, update the camera firmware';
+          return;
+        }
+        onCamInfo(ip, d);
+        if (ip == activeIp()) showParam(d);
+      });
+    }
+
+    function toggleOrient(bit) {
+      setOrient(orientOf(activeImg()) ^ bit);
+    }
+
+    function rotateOrient() {
+      const o = orientOf(activeImg());
+      setOrient((o & 3) | (((oRot(o) + 1) & 3) << 2));
     }
 
 
@@ -1060,7 +1220,9 @@
         const r = el.getBoundingClientRect();
         const horizontal = profileDir == 'h';
         // thickness in image pixels -> screen pixels (the image may be shown scaled)
-        const scale = el.naturalWidth ? r.width / el.naturalWidth : 1;
+        // (turned by 90°, the shown width is the height of the frame)
+        const natW = oRot(orientOf(el)) % 2 ? el.naturalHeight : el.naturalWidth;
+        const scale = natW ? r.width / natW : 1;
         const band = Math.max(profileThickness * scale, 2);
         line.classList.toggle('vertical', !horizontal);
         line.classList.toggle('thin', band < 6);
@@ -1087,15 +1249,17 @@
       if (el._analyzing || el !== crossTarget()) return;
       el._analyzing = true;
       createImageBitmap(blob).then(bmp => {
+        // the frame as shown (flipped / turned), so the graphs follow the screen
+        const frame = orientedFrame(bmp, orientOf(el));
         // cross center in image pixels (the image may be shown scaled)
         const r = el.getBoundingClientRect();
         const c = cnvs.getBoundingClientRect();
-        const scale = bmp.width / r.width;
+        const scale = frame.width / r.width;
         const cx = (c.left + c.width / 2 - r.left) * scale;
         const cy = (c.top + c.height / 2 - r.top) * scale;
-        if (sumOn) sumFrame(el, bmp, cx, cy, scale);
-        if (profileOn) profileFrame(bmp, cx, cy);
-        if (focusOn) focusFrame(el, bmp, cx, cy, scale);
+        if (sumOn) sumFrame(el, frame, cx, cy, scale);
+        if (profileOn) profileFrame(frame, cx, cy);
+        if (focusOn) focusFrame(el, frame, cx, cy, scale);
         bmp.close();
       }).catch(() => {}).finally(() => { el._analyzing = false; });
     }
@@ -1432,7 +1596,7 @@
 
     // one sample every 2 s (with the status queries), the last WIFI_LEN kept.
     // series key = device + ':up' (the access point receives the device, carries
-    // the video) or ':down' (the camera receives the access point)
+    // the video) or ':down' (the camera, or the phone in the app, receives the access point)
     const WIFI_LEN = 100;
     const WIFI_MS = 2000;
     // categorical colors in fixed order; a device keeps its color while it comes and goes
@@ -1481,11 +1645,20 @@
       return dev.slice(2);
     }
 
+    // inside the webCam Android app: the signal the phone receives from the
+    // access point in dBm (0 = unknown); a browser cannot measure it
+    function phoneRssi() {
+      try { return window.AndroidWifi ? AndroidWifi.rssi() : 0; } catch (e) { return 0; }
+    }
+
     function wifiSample() {
       const now = Date.now();
       const values = {};
-      const clamp = v => Math.max(-95, Math.min(-25, v));
+      // very close devices reach -20 dBm and above
+      const clamp = v => Math.max(-95, Math.min(-10, v));
       if (youRssi) values['you:up'] = clamp(youRssi);
+      const phone = phoneRssi();
+      if (phone) values['you:down'] = clamp(phone);
       for (const cam of camList) {
         const fresh = now - (camRssiTime[cam.ip] || 0) < 3 * WIFI_MS;
         if (apRssi[cam.ip]) values[`cam${cam.n}:up`] = clamp(apRssi[cam.ip]);
@@ -1527,15 +1700,22 @@
       document.getElementById('wifiLegend').innerHTML = devices.map(dev => {
         const up = wifiHist[dev + ':up'], down = wifiHist[dev + ':down'];
         let text = `AP receives ${fmt(up ? up[shown] : null)}`;
-        if (dev.startsWith('cam')) text += `, receives AP ${fmt(down ? down[shown] : null)}`;
+        if (dev.startsWith('cam') || down) text += `, receives AP ${fmt(down ? down[shown] : null)}`;
         return `<div class="sum-key"><i style="background:${wifiColor(dev)}"></i>` +
                `${wifiLabel(dev)}: ${text}</div>`;
-      }).join('') + (ap ? `<div class="sum-where">Camera ${ap.n} is the access point</div>` : '');
+      }).join('') +
+        // what the two line styles and "AP" mean
+        `<div class="sum-where">AP = access point, the device that makes the WiFi` +
+        (ap ? ` (camera ${ap.n})` : '') + `.<br>` +
+        `<svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="#777" stroke-width="2"/></svg>` +
+        ` solid: AP receives the device &nbsp; ` +
+        `<svg width="22" height="8" aria-hidden="true"><line x1="0" y1="4" x2="22" y2="4" stroke="#777" stroke-width="2" stroke-dasharray="6 4"/></svg>` +
+        ` dashed: the device receives AP</div>`;
       document.getElementById('wifiWhen').innerText =
         !n ? 'waiting for data' : (shown == n - 1 ? 'latest' : `${(n - 1 - shown) * WIFI_MS / 1000} s ago`);
 
       drawChart(document.getElementById('wifiChart'), wifiHist, {
-        series, slots: WIFI_LEN, offset: WIFI_LEN - n, lo: -95, hi: -25, fmt: v => v.toFixed(0),
+        series, slots: WIFI_LEN, offset: WIFI_LEN - n, lo: -95, hi: -10, fmt: v => v.toFixed(0),
         xLabel: `last ${WIFI_LEN} samples, every ${WIFI_MS / 1000} s`, hover: wifiHover,
         refs: [{v: -60, label: 'good'}, {v: -70, label: 'stutter'}],
       });
@@ -1659,8 +1839,14 @@
       const q = queues[key] = queues[key] || {busy: false, pending: {}};
       q.pending[param] = value;
       q.onReply = onReply;
+      q.retried = false;          // a new value may be sent again once
       flush(key, ip, path);
     }
+
+    // a request without answer in this time was probably lost on the WiFi (a busy
+    // WiFi, e.g. a fast video stream, loses more); then the next one is sent instead
+    // of waiting seconds for the phone to repeat it
+    const SET_TIMEOUT_MS = 2500;
 
     function flush(key, ip, path) {
       const q = queues[key];
@@ -1671,11 +1857,23 @@
       const value = q.pending[param];
       delete q.pending[param];
       q.busy = true;
-      fetch(`http://${ip}/${path}?set=${param}&value=${value}`, {mode: "cors"})
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), SET_TIMEOUT_MS);
+      fetch(`http://${ip}/${path}?set=${param}&value=${value}`, {mode: "cors", signal: ctrl.signal})
         .then(r => r.json())
-        .then(d => { if (Object.keys(q.pending).length == 0 && q.onReply) q.onReply(d); })
-        .catch(() => {})
-        .finally(() => { q.busy = false; flush(key, ip, path); });
+        .then(d => {
+          q.retried = false;
+          if (Object.keys(q.pending).length == 0 && q.onReply) q.onReply(d);
+        })
+        .catch(() => {
+          // no answer in time: send the value again, unless a newer one is waiting;
+          // only once, so a device that is off is not asked again and again
+          if (ctrl.signal.aborted && !(param in q.pending) && !q.retried) {
+            q.pending[param] = value;
+            q.retried = true;
+          }
+        })
+        .finally(() => { clearTimeout(timer); q.busy = false; flush(key, ip, path); });
     }
 
     // set a camera parameter on the cameras ips (default: the active camera)
@@ -1767,6 +1965,8 @@
         ps.value = d.fps;
         document.getElementById('fpsLimitVal').innerText = d.fps;
       }
+      if (d.txpower !== undefined) showTxPower(d.txpower);
+      showOrient();
       showPresets();
     }
 
@@ -1794,7 +1994,7 @@
     /* ---------- LED boards (ledCom firmware) ---------- */
 
     let ledList = [];        // [{n: 1, ip: '192.168.4.5'}, ...] from the access point
-    const LED_COLORS = ['red', 'green', 'blue', 'white'];
+    const LED_COLORS = ['off', 'red', 'green', 'blue', 'white'];
 
     // one control panel per LED board, talking directly to http://<ip>/led
     function renderLeds() {
@@ -2024,7 +2224,9 @@
         (zoom.z > 1 ? ` = ${out[0]}x${out[1]}, field of view ${(100 / zoom.z).toFixed(0)} %` : '') +
         (zoomMax < ZOOM_MAX ? ` (up to ${zoomMax.toFixed(0)}x)` : '');
       document.getElementById('panBox').style.display = zoom.z > 1 ? '' : 'none';
-      const px = Math.round(zoom.cx * 100), py = Math.round(zoom.cy * 100);
+      // left / right and up / down of the shown (flipped / turned) image
+      const s = toShown(orientOf(activeImg()), zoom.cx, zoom.cy);
+      const px = Math.round(s.x * 100), py = Math.round(s.y * 100);
       document.getElementById('panXSlider').value = px;
       document.getElementById('panXVal').innerText = px;
       document.getElementById('panYSlider').value = py;
@@ -2051,8 +2253,10 @@
       if (el) {
         const r = el.getBoundingClientRect();
         const c = cnvs.getBoundingClientRect();
-        const rx = (c.left + c.width / 2 - r.left) / r.width - 0.5;   // -0.5 .. 0.5 across the image
-        const ry = (c.top + c.height / 2 - r.top) / r.height - 0.5;
+        // -0.5 .. 0.5 across the shown image -> across the image as the camera sends it
+        const d = offsetToSensor(orientOf(el), (c.left + c.width / 2 - r.left) / r.width - 0.5,
+                                               (c.top + c.height / 2 - r.top) / r.height - 0.5);
+        const rx = d.x, ry = d.y;
         const px = zoom.cx + rx / zoom.z, py = zoom.cy + ry / zoom.z; // point under the cross, on the sensor
         zoom.cx = px - rx / z;
         zoom.cy = py - ry / z;
@@ -2061,10 +2265,14 @@
       sendZoom();
     }
 
-    // move the zoomed view: center 0 .. 100 % of the sensor width / height
+    // move the zoomed view: center 0 .. 100 % of the width / height of the shown image
     function setPan(axis, val) {
-      if (axis == 'x') zoom.cx = parseInt(val) / 100;
-      else zoom.cy = parseInt(val) / 100;
+      const o = orientOf(activeImg());
+      const s = toShown(o, zoom.cx, zoom.cy);
+      s[axis] = parseInt(val) / 100;
+      const p = toSensorImg(o, s.x, s.y);
+      zoom.cx = p.x;
+      zoom.cy = p.y;
       sendZoom();
     }
 
@@ -2075,6 +2283,34 @@
       for (const ip of activeTargets()) targetFps[ip] = parseInt(val);
       showPresets();
       sendSet('fps', val);
+    }
+
+    // WiFi transmit power levels of the ESP32 in 0.25 dBm (8 = 2 dBm .. 78 = 19.5 dBm)
+    const TX_LEVELS = [8, 20, 28, 34, 44, 52, 60, 68, 74, 76, 78];
+
+    function showTxPower(q) {
+      // nearest level (the camera may report a value between two levels)
+      let i = 0;
+      TX_LEVELS.forEach((l, k) => { if (Math.abs(l - q) < Math.abs(TX_LEVELS[i] - q)) i = k; });
+      document.getElementById('txSlider').value = i;
+      document.getElementById('txVal').innerText = (TX_LEVELS[i] / 4) + ' dBm';
+    }
+
+    // on the active camera, like the other Advanced settings.
+    // the camera answers with the power its radio really uses
+    function setTxPower(i) {
+      const q = TX_LEVELS[i];
+      showTxPower(q);
+      for (const ip of activeTargets()) {
+        queueSet(ip, 'camera', 'txpower', q, d => {
+          if (d.error) {                 // camera with an older firmware
+            if (ip == activeIp()) document.getElementById('txVal').innerText = 'not supported, update the camera firmware';
+            return;
+          }
+          onCamInfo(ip, d);
+          if (ip == activeIp()) showParam(d);
+        });
+      }
     }
 
     // AUTO on: exposure, gain and white balance automatic.
@@ -2176,6 +2412,7 @@
         el._badge = tile.querySelector('.cam-badge');
         addBadgeDoubleTap(el);
         makeCross(el);
+        watchOrient(el);
         imgs.push(el);
       }
       return imgs[i];
@@ -2205,6 +2442,8 @@
     function showCamState() {
       const shown = camList.filter(cam => shownCams.has(cam.n));
 
+      // no camera in the network: hide the camera controls and graphs
+      document.body.classList.toggle('no-cams', camList.length == 0);
       renderCamButtons();
       for (let i = 0; i < Math.max(imgs.length, shown.length); i++) {
         const el = getImg(i);

@@ -25,6 +25,7 @@
 #include <string>
 #include <atomic>
 #include <HTTPClient.h>
+#include <Preferences.h>
 #include "lwip/sockets.h"
 
 #include "index_html_gz.h"
@@ -57,9 +58,15 @@ String ipAP = "192.168.4.1";
 #define AP_SCAN_INTERVAL_LATE_MS 60000
 #define AP_SCAN_FAST_PERIOD_MS 120000
 
-// own camera number, shown by the LED blinking: 1 = access point,
+// own camera number (blinked by the LED, see blinkStatus): 1 = access point,
 // 2.. = assigned by the access point at registration, 0 = not known yet
 static volatile int camNumber = 0;
+
+// an LED board that is the access point hands the role over to a camera (two hops
+// through the LED board halve the frame rate): the camera restarts and becomes
+// the access point at once. Kept over the software restart (not over power off).
+#define BECOME_AP_MAGIC 0xA9C0FFEEu
+RTC_NOINIT_ATTR static uint32_t becomeApMagic;
 
 // camera sensor of this board (OV2640 or OV3660 on the XIAO ESP32S3 Sense), set in setCamDefault()
 static const char *sensorName = "unknown";
@@ -175,6 +182,25 @@ uint32_t yPosition = 200;
 #define MAX_FPS_LIMIT 50           // the OV2640 delivers at most ~50 fps (up to 400x296, 20 MHz clock)
 
 static volatile int maxFps = DEFAULT_MAX_FPS;
+
+// WiFi transmit power in 0.25 dBm steps (78 = 19.5 dBm, the maximum). Lower power
+// draws smaller current peaks, which helps a weak battery whose voltage drops
+// while sending (bad frame rate). Set from the page, kept in flash over restarts.
+#define MAX_TX_POWER 78
+#define MIN_TX_POWER 8             // 2 dBm
+static int txPower = MAX_TX_POWER;
+static Preferences prefs;
+
+// how the page shows the image of this camera (it is sent unchanged): bit 0 = flip
+// horizontal, bit 1 = flip vertical, bits 2-3 = clockwise quarter turns after the
+// flips. Kept here, so every viewer shows it the same way; kept in flash over restarts.
+// default: flipped horizontally and vertically
+#define DEFAULT_ORIENT 3
+static int orient = DEFAULT_ORIENT;
+
+static void applyTxPower() {
+  WiFi.setTxPower((wifi_power_t)txPower);
+}
 
 static const char* _STREAM_HEADER =
   "HTTP/1.1 200 OK\r\n"
@@ -585,6 +611,17 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
           if (value > MAX_FPS_LIMIT) value = MAX_FPS_LIMIT;
           maxFps = value;
         }
+        else if (strcmp(param, "orient") == 0) {      // flip / turn on the page, saved in flash
+          orient = value & 15;
+          prefs.putInt("orient", orient);
+        }
+        else if (strcmp(param, "txpower") == 0) {     // 0.25 dBm steps, saved in flash
+          txPower = constrain(value, MIN_TX_POWER, MAX_TX_POWER);
+          applyTxPower();
+          prefs.putInt("txpower", txPower);
+          Serial.printf("WiFi transmit power set: %.2f dBm, in use: %.2f dBm\n",
+                        txPower / 4.0, WiFi.getTxPower() / 4.0);
+        }
         else {
             httpd_resp_set_type(req, "application/json");
             return httpd_resp_sendstr(req, "{\"error\":\"unknown_parameter\"}");
@@ -604,7 +641,7 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
     int saturation   = s->status.saturation;
     int framesize    = s->status.framesize;
 
-    char json[640];
+    char json[768];
     snprintf(json, sizeof(json),
         "{\"quality\":%d,\"exposure\":%d,\"auto_exposure\":%d,"
         "\"gain\":%d,\"brightness\":%d,\"contrast\":%d,"
@@ -613,7 +650,7 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         "\"wb_r\":%d,\"wb_g\":%d,\"wb_b\":%d,\"number\":%d,\"streamClients\":%d,"
         "\"fps\":%d,\"maxFpsLimit\":%d,\"sensor\":\"%s\",\"ap\":%d,\"rssi\":%d,"
         "\"zoom\":%d,\"zoomMax\":%d,\"zx\":%d,\"zy\":%d,\"sensorMode\":%d,"
-        "\"outW\":%d,\"outH\":%d,\"boot\":%u}",
+        "\"outW\":%d,\"outH\":%d,\"txpower\":%d,\"orient\":%d,\"boot\":%u}",
         quality, exposure, auto_exp,
         gain, brightness, contrast, saturation, framesize, MAX_FRAMESIZE,
         allAuto, s->status.agc, s->status.agc_gain, s->status.awb, s->status.wb_mode,
@@ -627,7 +664,8 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         zoomCx, zoomCy, sensorMode,
         zoomEffX10 > 10 ? zoomOutW : (int)resolution[s->status.framesize].width,
         zoomEffX10 > 10 ? zoomOutH : (int)resolution[s->status.framesize].height,
-        (unsigned)bootId
+        // the power the radio really uses (shows whether the setting took effect)
+        (int)WiFi.getTxPower(), orient, (unsigned)bootId
     );
 
     httpd_resp_set_type(req, "application/json");
@@ -877,6 +915,21 @@ static void streamServerTask(void *arg)
   }
 }
 
+// Handler for "/takeover" (station camera): the LED board that is the access point
+// asks this camera to become the access point. Answers {"ok":1}, then restarts as
+// access point; the LED board then joins it.
+static esp_err_t takeover_handler(httpd_req_t *req)
+{
+  httpd_resp_set_type(req, "application/json");
+  if (access_point == 1) return httpd_resp_sendstr(req, "{\"ok\":0}");
+  becomeApMagic = BECOME_AP_MAGIC;
+  esp_err_t res = httpd_resp_sendstr(req, "{\"ok\":1}");
+  Serial.println("access point handed over by the LED board, restarting as access point");
+  // restart after the answer is out
+  xTaskCreate([](void *) { vTaskDelay(pdMS_TO_TICKS(300)); ESP.restart(); }, "takeover", 2048, NULL, 1, NULL);
+  return res;
+}
+
 void startCameraServer(){
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.server_port = 80;
@@ -905,6 +958,13 @@ httpd_uri_t register_uri = {
     .user_ctx  = NULL
 };
 
+httpd_uri_t takeover_uri = {
+    .uri       = "/takeover",
+    .method    = HTTP_GET,
+    .handler   = takeover_handler,
+    .user_ctx  = NULL
+};
+
 httpd_uri_t devices_uri = {
     .uri       = "/devices",
     .method    = HTTP_GET,
@@ -925,6 +985,7 @@ httpd_uri_t cam_ctrl = {
     httpd_register_uri_handler(camera_httpd, &index_uri);
     httpd_register_uri_handler(camera_httpd, &ping_uri);
     httpd_register_uri_handler(camera_httpd, &register_uri);
+    httpd_register_uri_handler(camera_httpd, &takeover_uri);
     httpd_register_uri_handler(camera_httpd, &devices_uri);
     httpd_register_uri_handler(camera_httpd, &cam_ctrl);
   }
@@ -992,16 +1053,22 @@ void connectToWifi(){
   WiFi.mode(WIFI_STA);
   // WiFi power saving adds large latency/jitter to the video stream
   WiFi.setSleep(false);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  applyTxPower();
 
-  // random wait, so two cameras powered at the same moment do not decide at the same time
-  delay(esp_random() % 3000);
+  // the LED board handed the access point over (see takeover_handler): no search
+  bool takeOver = esp_reset_reason() == ESP_RST_SW && becomeApMagic == BECOME_AP_MAGIC;
+  becomeApMagic = 0;
 
-  WiFi.begin(ssid, password, WIFI_CHANNEL);
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < STA_CONNECT_TIMEOUT_MS) {
-    delay(250);
-    Serial.print(".");
+  if (!takeOver) {
+    // random wait, so two cameras powered at the same moment do not decide at the same time
+    delay(esp_random() % 3000);
+
+    WiFi.begin(ssid, password, WIFI_CHANNEL);
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < STA_CONNECT_TIMEOUT_MS) {
+      delay(250);
+      Serial.print(".");
+    }
   }
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -1026,7 +1093,7 @@ void connectToWifi(){
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(ssid, password, WIFI_CHANNEL, 0, MAX_WIFI_CLIENTS);
     WiFi.setSleep(false);
-    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+    applyTxPower();
     Serial.print("[+] AP Created with IP Gateway ");
     Serial.println(WiFi.softAPIP());
     access_point= 1;
@@ -1101,8 +1168,10 @@ void setCamDefault()
 
 void setup() {
 
-  // initialize digital pin LED_BUILTIN as an output.
+  // the LED stays on (LOW = on) while starting: camera, WiFi, server;
+  // it starts blinking in loop() once all is set up
   pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
 
   Serial.begin(115200);
   // shows whether a lost connection was a crash/brownout (restart) or a WiFi problem
@@ -1155,18 +1224,44 @@ void setup() {
 
   setCamDefault();
 
-  pinMode(LED_BUILTIN, OUTPUT);      // set the LED pin mode
-  digitalWrite(LED_BUILTIN, HIGH);  // set LED off
-
   delay(10);
 
 
   // new start: new id (the web server is started in connectToWifi)
   bootId = (esp_random() ^ micros()) | 1;
 
+  // WiFi transmit power chosen on the page before (default: maximum)
+  prefs.begin("webcam", false);
+  txPower = constrain(prefs.getInt("txpower", MAX_TX_POWER), MIN_TX_POWER, MAX_TX_POWER);
+  Serial.printf("WiFi transmit power: %.2f dBm\n", txPower / 4.0);
+  orient = prefs.getInt("orient", DEFAULT_ORIENT) & 15;
+
   // Wi-Fi connection
   connectToWifi();
 
+  // start-up done: LED off, a short pause so the first blink is visible
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(500);
+
+}
+
+// the yellow LED (LOW = on) shows the role in the network, the same on cameras
+// and LED boards: one long flash = this device is the access point, short
+// flashes = registered at the access point with this number (as on the page),
+// quick flicker = not registered (yet)
+static void blinkStatus(bool isAP, int number) {
+  auto flash = [](int onMs) {
+    digitalWrite(LED_BUILTIN, LOW);
+    delay(onMs);
+    digitalWrite(LED_BUILTIN, HIGH);
+  };
+  if (isAP) {
+    flash(1000);
+  } else if (number == 0) {
+    for (int i = 0; i < 5; i++) { if (i > 0) delay(60); flash(60); }
+  } else {
+    for (int i = 0; i < number; i++) { if (i > 0) delay(200); flash(200); }
+  }
 }
 
 void loop() {
@@ -1192,19 +1287,6 @@ void loop() {
   }
   Serial.printf("camera number: %d, sensor: %s\n", camNumber, sensorName);
 
-  // the LED flashes the camera number (LOW = LED on),
-  // one long flash = no number yet (not registered at the access point)
-  int flashes = camNumber;
-  if (flashes == 0) {
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(1000);
-    digitalWrite(LED_BUILTIN, HIGH);
-  }
-  for (int i = 0; i < flashes; i++) {
-    if (i > 0) delay(200);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(200);
-    digitalWrite(LED_BUILTIN, HIGH);
-  }
+  blinkStatus(access_point == 1, camNumber);
   delay(delayValue);                // wait
 }
