@@ -426,6 +426,15 @@
       const heard = apRssi[ip] ? apRssi[ip] + ' dBm' : '?';
       return `WiFi: receives AP ${hears}, AP receives ${heard}`;
     }
+
+    // battery voltage of a camera with the divider on pin 0 (mV in its status);
+    // values outside a Li-ion battery's range come from a camera without it: not shown
+    const BATT_LOW_MV = 3500;
+    function battText(ip) {
+      const mv = camInfo[ip] && camInfo[ip].batt;
+      if (!mv || mv < 2500 || mv > 4700) return '';
+      return `, battery ${(mv / 1000).toFixed(2)} V${mv < BATT_LOW_MV ? ' (low, charge it)' : ''}`;
+    }
     //var c='http://esp32.local'
     //var c=document.location.origin
     let allAuto = 1;
@@ -955,7 +964,7 @@
             ? `frame ${(s.bytes / 1024 / s.frames).toFixed(0)} kB, ` +
               `transfer ${(s.xferSum / s.frames).toFixed(0)} ms (max ${s.xferMax} ms), `
             : '';
-          lines.push(`Cam ${el._n} (${sensors[el._ip] || '?'}, ${el._ip}, ${wifiText(el._ip)}): ${fps.toFixed(1)} fps, ` +
+          lines.push(`Cam ${el._n} (${sensors[el._ip] || '?'}, ${el._ip}, ${wifiText(el._ip)}${battText(el._ip)}): ${fps.toFixed(1)} fps, ` +
                      `${(s.bytes / 1024 / dt).toFixed(0)} kB/s, ${xfer}` +
                      `max gap ${gap} ms, ${el._reconnects || 0} reconnects`);
 

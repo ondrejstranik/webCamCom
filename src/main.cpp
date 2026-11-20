@@ -202,6 +202,24 @@ static void applyTxPower() {
   WiFi.setTxPower((wifi_power_t)txPower);
 }
 
+// Battery voltage on pin D0 / A0 (GPIO1, ADC1: works while WiFi is on), through a
+// divider BAT+ - 200k - A0 - 200k - GND (+ 100 nF A0 - GND), so A0 sees half the
+// battery voltage. A camera without the divider reads noise from the open pin;
+// the page only shows plausible battery values.
+#define BATT_PIN 1
+#define BATT_DIVIDER 2.0f           // (R1 + R2) / R2
+static volatile int battMv = 0;      // smoothed battery voltage in mV, 0 = not measured yet
+
+// called from loop(): mean of a few readings (WiFi bursts disturb single ones),
+// then smoothed over several calls
+static void readBattery() {
+  uint32_t sum = 0;
+  const int n = 16;
+  for (int i = 0; i < n; i++) sum += analogReadMilliVolts(BATT_PIN);
+  int mv = (int)(sum / n * BATT_DIVIDER);
+  battMv = battMv ? (battMv * 3 + mv) / 4 : mv;
+}
+
 static const char* _STREAM_HEADER =
   "HTTP/1.1 200 OK\r\n"
   "Content-Type: multipart/x-mixed-replace;boundary=" PART_BOUNDARY "\r\n"
@@ -650,7 +668,7 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         "\"wb_r\":%d,\"wb_g\":%d,\"wb_b\":%d,\"number\":%d,\"streamClients\":%d,"
         "\"fps\":%d,\"maxFpsLimit\":%d,\"sensor\":\"%s\",\"ap\":%d,\"rssi\":%d,"
         "\"zoom\":%d,\"zoomMax\":%d,\"zx\":%d,\"zy\":%d,\"sensorMode\":%d,"
-        "\"outW\":%d,\"outH\":%d,\"txpower\":%d,\"orient\":%d,\"boot\":%u}",
+        "\"outW\":%d,\"outH\":%d,\"txpower\":%d,\"orient\":%d,\"batt\":%d,\"boot\":%u}",
         quality, exposure, auto_exp,
         gain, brightness, contrast, saturation, framesize, MAX_FRAMESIZE,
         allAuto, s->status.agc, s->status.agc_gain, s->status.awb, s->status.wb_mode,
@@ -665,7 +683,9 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         zoomEffX10 > 10 ? zoomOutW : (int)resolution[s->status.framesize].width,
         zoomEffX10 > 10 ? zoomOutH : (int)resolution[s->status.framesize].height,
         // the power the radio really uses (shows whether the setting took effect)
-        (int)WiFi.getTxPower(), orient, (unsigned)bootId
+        (int)WiFi.getTxPower(), orient,
+        battMv,                                 // battery in mV (see readBattery)
+        (unsigned)bootId
     );
 
     httpd_resp_set_type(req, "application/json");
@@ -1236,6 +1256,10 @@ void setup() {
   Serial.printf("WiFi transmit power: %.2f dBm\n", txPower / 4.0);
   orient = prefs.getInt("orient", DEFAULT_ORIENT) & 15;
 
+  // battery measurement: full range up to about 3.1 V at the pin (4.2 V battery = 2.1 V)
+  analogSetPinAttenuation(BATT_PIN, ADC_11db);
+  readBattery();
+
   // Wi-Fi connection
   connectToWifi();
 
@@ -1272,6 +1296,7 @@ void loop() {
   timing += 1;
 
   maintainWifi();
+  readBattery();
 
  if (access_point == 1) {
     Serial.print("[+] AP Created with IP Gateway ");
