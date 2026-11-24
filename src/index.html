@@ -26,6 +26,29 @@
   .cam-tile img {
     max-width: calc(100% - 46px);
   }
+  .cam-tile {
+    position: relative;     /* the stereo image is placed over the first camera image */
+  }
+  /* stereo: the second camera is only in the combined image */
+  .cam-tile.stereo-hidden {
+    display: none !important;
+  }
+  #stereoCv {
+    position: absolute;
+    pointer-events: none;   /* the cross on it stays movable */
+    z-index: 1;
+  }
+  .cam-badge .stereo-mark {
+    margin-top: 4px;
+    font-size: 10px;
+    font-weight: normal;
+    line-height: 1.3;
+  }
+  /* stereo: no cross, circle, profile line and graphs */
+  body.stereo .no-stereo, body.stereo #sumCircle, body.stereo #profileLine,
+  body.stereo .cam-badge .cross-pos { display: none !important; }
+  .stereo-mark .r { color: #ffb3b3; }
+  .stereo-mark .b { color: #b3d1ff; }
   .cam-badge {
     min-width: 40px;
     padding: 6px 0;
@@ -209,7 +232,7 @@
         <!-- one toggle button per camera, filled by renderCamButtons() -->
         <div id='camButtons'></div>
         <!-- mean of the pixels inside the pink circle, per channel, last 100 frames -->
-        <div id="sumBox" class="cam-only" style="display:none;">
+        <div id="sumBox" class="cam-only no-stereo" style="display:none;">
           <div id="sumInfo">...</div>
           <canvas id="sumChart" aria-label="Mean of red, green and blue under the green cross, last 100 frames"></canvas>
           <div id="sumLegend">
@@ -220,7 +243,7 @@
           </div>
         </div>
         <!-- sharpness (Tenengrad) inside the pink circle, last 100 frames -->
-        <div id="focusBox" class="cam-only" style="display:none;">
+        <div id="focusBox" class="cam-only no-stereo" style="display:none;">
           <div id="focusInfo">...</div>
           <canvas id="focusChart" aria-label="Sharpness inside the pink circle, last 100 frames"></canvas>
           <div>
@@ -241,12 +264,12 @@
         <!-- frame rate / transfer time / max gap of every shown camera, filled by buildMetricBoxes() -->
         <div id="metricBoxes" class="cam-only"></div>
         <!-- size of the pink circle, used by Mean and Focus -->
-        <div id="circleBox" class="cam-only" style="display:none;">
+        <div id="circleBox" class="cam-only no-stereo" style="display:none;">
           Circle diameter: <span id="sumDiaVal">48</span> px<br>
           <input type="range" id="sumDiaSlider" min="4" max="200" value="48" oninput="setSumDiameter(this.value)" style="width:100%;">
         </div>
         <!-- intensity profile along the line through the cross, per channel -->
-        <div id="profileBox" class="cam-only" style="display:none;">
+        <div id="profileBox" class="cam-only no-stereo" style="display:none;">
           <div id="profileInfo">...</div>
           <canvas id="profileChart" aria-label="Red, green and blue intensity along the line through the green cross"></canvas>
           <div>
@@ -292,8 +315,14 @@
           <button id="rotBtn" class="toggle" onclick="rotateOrient()">Rotate: 0°</button>
           <span id="orientNote" class="sum-where"></span>
         </div>
+        <div style="margin-top:10px;">
+          <!-- the first two shown cameras in one image: one in red, the other in blue -->
+          Mode:
+          <button id="stereoBtn" class="toggle" onclick="toggleStereo()">Stereo: off</button>
+          <span id="stereoNote" class="sum-where"></span>
+        </div>
     </div>
-    <span class="cam-only">
+    <span class="cam-only no-stereo">
       Graphs:
       <button id="sumBtn" class="toggle" onclick="toggleSum()">Mean</button>
       <button id="profileBtn" class="toggle" onclick="toggleProfile()">Profile</button>
@@ -311,6 +340,15 @@
     </div>
     <div id="advanced" class="cam-only" style="display:none;">
       <p>Stream: <span id='fpsval'>...</span></p>
+      <!-- which camera is red and which blue in the stereo image, only while Stereo is on -->
+      <div id="stereoSwapBox" style="margin:20px; display:none;">
+          Stereo colors:
+          <button id="stereoSwapBtn" class="toggle" onclick="toggleStereoSwap()">Swap red / blue</button>
+          <span id="stereoSwapVal" class="sum-where"></span><br>
+          <!-- 50 = both channels full; lower = blue darker, higher = red darker -->
+          Red / blue intensity: <span id="stereoMixVal">red 100 %, blue 100 %</span><br>
+          <input type="range" id="stereoMixSlider" min="0" max="100" value="50" oninput="setStereoMix(this.value)" style="width:100%;">
+      </div>
       <div style="margin:20px;">
           JPEG quality: <span id="qval">...</span> (lower = better image, larger frames)<br>
           <input type="range" id="qualitySlider" min="10" max="63" value="10" oninput="setQuality(this.value)">
@@ -434,6 +472,16 @@
       const mv = camInfo[ip] && camInfo[ip].batt;
       if (!mv || mv < 2500 || mv > 4700) return '';
       return `, battery ${(mv / 1000).toFixed(2)} V${mv < BATT_LOW_MV ? ' (low, charge it)' : ''}`;
+    }
+
+    // chip temperature (the ESP32 die, warmer than the air); hot: noisier image,
+    // larger frames, a weak battery sags more
+    const TEMP_HOT_C = 75;
+    function tempText(ip) {
+      const t = camInfo[ip] && camInfo[ip].temp;
+      if (t === undefined || t <= -400) return '';
+      const c = t / 10;
+      return `, chip ${c.toFixed(0)} °C${c >= TEMP_HOT_C ? ' (hot, cool it / lower fps)' : ''}`;
     }
     //var c='http://esp32.local'
     //var c=document.location.origin
@@ -664,7 +712,7 @@
         const rx = (p.x - v.cx) * v.z + 0.5;     // 0..1 across the image, outside = not in the view
         const ry = (p.y - v.cy) * v.z + 0.5;
         el._crossOut = rx < 0 || rx >= 1 || ry < 0 || ry >= 1;
-        if (!isShown(el) || el._crossOut) { c.style.display = 'none'; continue; }
+        if (!isShown(el) || el._crossOut || stereoActive()) { c.style.display = 'none'; continue; }
         c.style.display = '';
         c.style.opacity = el._n == activeCamN ? '1' : '0.45';
         const r = el.getBoundingClientRect();
@@ -799,6 +847,13 @@
         onCamInfo(ip, d);
         if (ip == activeIp()) showParam(d);
       });
+      // stereo: the second camera is flipped / turned the same way
+      if (stereoActive() && el === imgs[0]) {
+        const ip2 = imgs[1]._ip;
+        orientLocal[ip2] = {o, t: Date.now()};
+        queueSet(ip2, 'camera', 'orient', o, d => onCamInfo(ip2, d));
+        stereoFrame();
+      }
     }
 
     function toggleOrient(bit) {
@@ -808,6 +863,177 @@
     function rotateOrient() {
       const o = orientOf(activeImg());
       setOrient((o & 3) | (((oRot(o) + 1) & 3) << 2));
+    }
+
+
+    /* ---------- stereo: two cameras in one image ---------- */
+
+    // The first two shown cameras in one image, each as it is shown (flipped / turned):
+    // the brightness of one camera in the red channel, of the other in the blue channel.
+    // The image lies over the first camera's image, so its cross, the circle, the
+    // profile line and the graphs belong to the first camera. Kept in this browser.
+    var stereoOn = false, stereoSwap = false;   // var: also readable before this point
+    let stereoMix = 50;       // 0 = only red, 50 = both full, 100 = only blue
+    try {
+      stereoOn = localStorage.getItem('stereo') == '1';
+      stereoSwap = localStorage.getItem('stereoSwap') == '1';
+      const m = parseInt(localStorage.getItem('stereoMix'));
+      if (m >= 0 && m <= 100) stereoMix = m;
+    } catch (e) {}
+
+    // intensity of the red and the blue channel (0..1) from the slider
+    const stereoGains = () => [Math.min(1, (100 - stereoMix) / 50), Math.min(1, stereoMix / 50)];
+
+    function showStereoMix() {
+      const [gr, gb] = stereoGains();
+      document.getElementById('stereoMixSlider').value = stereoMix;
+      document.getElementById('stereoMixVal').innerText =
+        `red ${Math.round(gr * 100)} %, blue ${Math.round(gb * 100)} %`;
+    }
+
+    function setStereoMix(val) {
+      stereoMix = parseInt(val);
+      try { localStorage.setItem('stereoMix', stereoMix); } catch (e) {}
+      showStereoMix();
+      stereoFrame();
+    }
+
+    const stereoCv = document.createElement('canvas');
+    stereoCv.id = 'stereoCv';
+    stereoCv.style.display = 'none';
+    img._tile.appendChild(stereoCv);
+    const stereoCtx = stereoCv.getContext('2d');
+    const stereoTmp = document.createElement('canvas');
+    const stereoTmpCtx = stereoTmp.getContext('2d', {willReadFrequently: true});
+    let stereoPending = false;
+
+    function hasStream(el) { return !!(el && el._ip && el._ip != '0'); }
+    function stereoActive() { return !!stereoOn && hasStream(imgs[0]) && hasStream(imgs[1]); }
+
+    // draw an image flipped / turned like the page shows it, into w x h
+    function drawOriented(ctx, src, o, w, h) {
+      const odd = oRot(o) % 2;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.translate(w / 2, h / 2);
+      ctx.rotate(oRot(o) * Math.PI / 2);
+      ctx.scale(oH(o) ? -1 : 1, oV(o) ? -1 : 1);
+      const dw = odd ? h : w, dh = odd ? w : h;
+      ctx.drawImage(src, -dw / 2, -dh / 2, dw, dh);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    }
+
+    // brightness of the camera image (0..255 per pixel) at the size of the stereo image
+    function stereoLuma(el, w, h) {
+      stereoTmpCtx.fillStyle = '#000';
+      stereoTmpCtx.fillRect(0, 0, w, h);
+      drawOriented(stereoTmpCtx, el, orientOf(el), w, h);
+      const d = stereoTmpCtx.getImageData(0, 0, w, h).data;
+      const l = new Uint8Array(w * h);
+      for (let i = 0, j = 0; j < l.length; i += 4, j++) l[j] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+      return l;
+    }
+
+    function renderStereo() {
+      stereoPending = false;
+      if (!stereoActive()) return;
+      const a = imgs[0], b = imgs[1];
+      if (!a.naturalWidth || !b.naturalWidth) return;
+      // the size of the first camera's image (as shown)
+      const odd = oRot(orientOf(a)) % 2;
+      const w = odd ? a.naturalHeight : a.naturalWidth;
+      const h = odd ? a.naturalWidth : a.naturalHeight;
+      if (stereoTmp.width != w || stereoTmp.height != h) { stereoTmp.width = w; stereoTmp.height = h; }
+      if (stereoCv.width != w || stereoCv.height != h) { stereoCv.width = w; stereoCv.height = h; }
+      const la = stereoLuma(a, w, h), lb = stereoLuma(b, w, h);
+      const [red, blue] = stereoSwap ? [lb, la] : [la, lb];
+      const out = stereoCtx.createImageData(w, h);
+      const o = out.data;
+      const [gr, gb] = stereoGains();
+      for (let i = 0, j = 0; j < red.length; i += 4, j++) {
+        o[i] = red[j] * gr;
+        o[i + 2] = blue[j] * gb;
+        o[i + 3] = 255;
+      }
+      stereoCtx.putImageData(out, 0, 0);
+      // exactly over the first camera's image (also when it is turned)
+      const r = a.getBoundingClientRect(), t = a._tile.getBoundingClientRect();
+      stereoCv.style.left = (r.left - t.left) + 'px';
+      stereoCv.style.top = (r.top - t.top) + 'px';
+      stereoCv.style.width = r.width + 'px';
+      stereoCv.style.height = r.height + 'px';
+    }
+
+    // a new frame of one of the two cameras: draw again (once per screen refresh)
+    function stereoFrame() {
+      if (stereoPending || !stereoActive()) return;
+      stereoPending = true;
+      requestAnimationFrame(renderStereo);
+    }
+    img.addEventListener('load', stereoFrame);
+    img2.addEventListener('load', stereoFrame);
+
+    // stereo starts (or other cameras): the second camera gets the image settings of the
+    // first one (frame size, zoom and view, flip / rotate, quality, max fps); from then on
+    // every setting goes to both cameras (activeTargets)
+    let stereoPair = '';
+    function stereoMatch() {
+      const a = imgs[0]._ip, b = imgs[1]._ip;
+      fetch(`http://${a}/camera`, {mode: "cors"})
+        .then(r => r.json())
+        .then(d => {
+          onCamInfo(a, d);
+          if (!stereoActive() || imgs[0]._ip != a || imgs[1]._ip != b) return;
+          const done = r => onCamInfo(b, r);
+          // one after the other, in this order (the zoom range depends on the frame size)
+          queueSet(b, 'camera', 'framesize', d.framesize, done);
+          if (d.zoom !== undefined) queueSet(b, 'camera', 'zoom', `${d.zoom},${d.zx},${d.zy}`, done);
+          queueSet(b, 'camera', 'quality', d.quality, done);
+          if (d.fps !== undefined) { queueSet(b, 'camera', 'fps', d.fps, done); targetFps[b] = d.fps; }
+          const o = d.orient || 0;
+          orientLocal[b] = {o, t: Date.now()};
+          queueSet(b, 'camera', 'orient', o, done);
+          stereoFrame();
+        })
+        .catch(() => {});
+    }
+
+    // show the stereo image or the single images, after the shown cameras changed
+    function updateStereo() {
+      const act = stereoActive();
+      document.body.classList.toggle('stereo', act);
+      const pair = act ? imgs[0]._ip + '|' + imgs[1]._ip : '';
+      if (pair && pair != stereoPair) stereoMatch();
+      stereoPair = pair;
+      const btn = document.getElementById('stereoBtn');
+      btn.classList.toggle('on', stereoOn);
+      btn.innerText = 'Stereo: ' + (stereoOn ? 'on' : 'off');
+      document.getElementById('stereoNote').innerText =
+        stereoOn && !act ? 'switch two cameras on' : '';
+      imgs[0].style.visibility = act ? 'hidden' : '';
+      imgs[1]._tile.classList.toggle('stereo-hidden', act);
+      stereoCv.style.display = act ? '' : 'none';
+      document.getElementById('stereoSwapBox').style.display = stereoOn ? '' : 'none';
+      const [rn, bn] = stereoSwap ? [imgs[1]._n, imgs[0]._n] : [imgs[0]._n, imgs[1]._n];
+      document.getElementById('stereoSwapVal').innerText =
+        act ? `red: camera ${rn}, blue: camera ${bn}` : '';
+      document.getElementById('stereoSwapBtn').classList.toggle('on', stereoSwap);
+      showStereoMix();
+      // the second camera has no image of its own: its cross and graphs go to the first
+      if (act && activeCamN == imgs[1]._n) setActiveCam(imgs[0]._n);
+      if (act) stereoFrame();
+      if (!moving) placeCrosses();
+    }
+
+    function toggleStereo() {
+      stereoOn = !stereoOn;
+      try { localStorage.setItem('stereo', stereoOn ? '1' : '0'); } catch (e) {}
+      updateStereo();
+    }
+
+    function toggleStereoSwap() {
+      stereoSwap = !stereoSwap;
+      try { localStorage.setItem('stereoSwap', stereoSwap ? '1' : '0'); } catch (e) {}
+      updateStereo();
     }
 
 
@@ -941,7 +1167,7 @@
       el._url = URL.createObjectURL(blob);
       el.src = el._url;
       if (old) URL.revokeObjectURL(old);
-      if (sumOn || profileOn || focusOn) analyzeFrame(el, blob);
+      if ((sumOn || profileOn || focusOn) && !stereoActive()) analyzeFrame(el, blob);
     }
 
     // every second: frame rate, data rate and the longest pause between two
@@ -964,7 +1190,7 @@
             ? `frame ${(s.bytes / 1024 / s.frames).toFixed(0)} kB, ` +
               `transfer ${(s.xferSum / s.frames).toFixed(0)} ms (max ${s.xferMax} ms), `
             : '';
-          lines.push(`Cam ${el._n} (${sensors[el._ip] || '?'}, ${el._ip}, ${wifiText(el._ip)}${battText(el._ip)}): ${fps.toFixed(1)} fps, ` +
+          lines.push(`Cam ${el._n} (${sensors[el._ip] || '?'}, ${el._ip}, ${wifiText(el._ip)}${battText(el._ip)}${tempText(el._ip)}):${fps.toFixed(1)} fps, ` +
                      `${(s.bytes / 1024 / dt).toFixed(0)} kB/s, ${xfer}` +
                      `max gap ${gap} ms, ${el._reconnects || 0} reconnects`);
 
@@ -1129,10 +1355,12 @@
       return cam ? cam.ip : null;
     }
 
-    // the cameras the settings act on: the active one
+    // the cameras the settings act on: the active one (stereo: both cameras of the stereo image)
     function activeTargets() {
       const ip = activeIp();
-      return ip ? [ip] : [];
+      if (!ip) return [];
+      if (stereoActive() && ip == imgs[0]._ip) return [ip, imgs[1]._ip];
+      return [ip];
     }
 
     function activeImg() {
@@ -1168,6 +1396,12 @@
           (el._n == activeCamN ? '<div class="active-mark">A</div>' : '') +
           `<div class="cross-pos${el._crossOut ? ' out' : ''}">x ${Math.round(p.x * 1600)}<br>` +
           `y ${Math.round(p.y * 1200)}</div>`;
+        // stereo image: which camera is which color
+        if (el === imgs[0] && stereoActive()) {
+          const [rn, bn] = stereoSwap ? [imgs[1]._n, imgs[0]._n] : [imgs[0]._n, imgs[1]._n];
+          el._badge.innerHTML += `<div class="stereo-mark"><span class="r">${rn} red</span><br>` +
+            `<span class="b">${bn} blue</span></div>`;
+        }
       }
     }
 
@@ -2258,7 +2492,7 @@
     // (around the image center when the cross is not on a camera image)
     function setZoom(val) {
       const z = Math.min(Math.round(parseFloat(val)), zoomMax);
-      const el = crossTarget();
+      const el = stereoActive() ? null : crossTarget();   // stereo: no cross, around the center
       if (el) {
         const r = el.getBoundingClientRect();
         const c = cnvs.getBoundingClientRect();
@@ -2460,6 +2694,7 @@
         setStream(el, shown[i] ? shown[i].ip : null);
       }
       ensureActiveCam();
+      updateStereo();
       showBadges();
       for (const cam of shown) fetchCamStatus(cam.ip);
       refreshCameraParam();

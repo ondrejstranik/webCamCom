@@ -220,6 +220,17 @@ static void readBattery() {
   battMv = battMv ? (battMv * 3 + mv) / 4 : mv;
 }
 
+// chip temperature (internal sensor of the ESP32-S3, about +-2 degC; the die, so warmer
+// than the air) in 0.1 degC, read every 2 s from loop(); -1000 = not read yet
+static volatile int chipTempX10 = -1000;
+static void readChipTemp() {
+  static uint32_t last = 0;
+  if (chipTempX10 != -1000 && millis() - last < 2000) return;
+  last = millis();
+  float t = temperatureRead();
+  if (!isnan(t)) chipTempX10 = (int)lroundf(t * 10);
+}
+
 static const char* _STREAM_HEADER =
   "HTTP/1.1 200 OK\r\n"
   "Content-Type: multipart/x-mixed-replace;boundary=" PART_BOUNDARY "\r\n"
@@ -668,7 +679,7 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         "\"wb_r\":%d,\"wb_g\":%d,\"wb_b\":%d,\"number\":%d,\"streamClients\":%d,"
         "\"fps\":%d,\"maxFpsLimit\":%d,\"sensor\":\"%s\",\"ap\":%d,\"rssi\":%d,"
         "\"zoom\":%d,\"zoomMax\":%d,\"zx\":%d,\"zy\":%d,\"sensorMode\":%d,"
-        "\"outW\":%d,\"outH\":%d,\"txpower\":%d,\"orient\":%d,\"batt\":%d,\"boot\":%u}",
+        "\"outW\":%d,\"outH\":%d,\"txpower\":%d,\"orient\":%d,\"batt\":%d,\"temp\":%d,\"boot\":%u}",
         quality, exposure, auto_exp,
         gain, brightness, contrast, saturation, framesize, MAX_FRAMESIZE,
         allAuto, s->status.agc, s->status.agc_gain, s->status.awb, s->status.wb_mode,
@@ -685,6 +696,7 @@ static esp_err_t camera_control_handler(httpd_req_t *req)
         // the power the radio really uses (shows whether the setting took effect)
         (int)WiFi.getTxPower(), orient,
         battMv,                                 // battery in mV (see readBattery)
+        chipTempX10,                            // chip temperature in 0.1 degC (see readChipTemp)
         (unsigned)bootId
     );
 
@@ -1259,6 +1271,7 @@ void setup() {
   // battery measurement: full range up to about 3.1 V at the pin (4.2 V battery = 2.1 V)
   analogSetPinAttenuation(BATT_PIN, ADC_11db);
   readBattery();
+  readChipTemp();
 
   // Wi-Fi connection
   connectToWifi();
@@ -1297,6 +1310,7 @@ void loop() {
 
   maintainWifi();
   readBattery();
+  readChipTemp();
 
  if (access_point == 1) {
     Serial.print("[+] AP Created with IP Gateway ");
